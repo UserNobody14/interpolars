@@ -1,6 +1,7 @@
 import itertools
 
 import polars as pl
+from polars.testing import assert_frame_equal
 
 from interpolars import interpolate_nd
 
@@ -19,7 +20,8 @@ def get_target_df():
             "xfield": [0.0, 1.0, 0.0, 0.0, 0.5, 0.25],
             "yfield": [0.0, 0.0, 1.0, 0.0, 0.5, 0.75],
             "zfield": [0.0, 0.0, 0.0, 1.0, 0.5, 0.5],
-            "labels": ["a", "b", "c", "d", "e", "f"],
+            # Imaginary labels
+            # "labels": ["a", "b", "c", "d", "e", "f"],
         }
     ).with_columns(
         pl.struct([pl.col("xfield"), pl.col("yfield"), pl.col("zfield")]).alias("x")
@@ -47,7 +49,7 @@ def get_source_df():
     return pl.DataFrame(
         {"xfield": xf, "yfield": yf, "zfield": zf, "valuefield": vf}
     ).with_columns(
-        {
+        **{
             "x": pl.struct([pl.col("xfield"), pl.col("yfield"), pl.col("zfield")]),
             "value": pl.struct([pl.col("valuefield")]),
         }
@@ -61,11 +63,10 @@ def test_3d_interpolation():
     """
     target_df = get_target_df()
     source_df = get_source_df()
-
-    result = target_df.with_columns(
-        {"interpolated": interpolate_nd(pl.col("x"), source_df)}
+    result = source_df.with_columns(
+        **{"interpolated": interpolate_nd(pl.col("x"), pl.col("value"), target_df)}
     )
-
+    result = result.select(["xfield", "yfield", "zfield", "x", "interpolated"])
     expected_values = [
         100.0,  # (0, 0, 0)
         110.0,  # (1, 0, 0)
@@ -81,7 +82,8 @@ def test_3d_interpolation():
                 "xfield": [0.0, 1.0, 0.0, 0.0, 0.5, 0.25],
                 "yfield": [0.0, 0.0, 1.0, 0.0, 0.5, 0.75],
                 "zfield": [0.0, 0.0, 0.0, 1.0, 0.5, 0.5],
-                "labels": ["a", "b", "c", "d", "e", "f"],
+                # Imaginary labels
+                # "labels": ["a", "b", "c", "d", "e", "f"],
                 "interpolated": expected_values,
             }
         )
@@ -93,7 +95,7 @@ def test_3d_interpolation():
                 "interpolated"
             )
         )
-        .select(["xfield", "yfield", "zfield", "labels", "x", "interpolated"])
+        .select(["xfield", "yfield", "zfield", "x", "interpolated"])
     )
 
-    pl.testing.assert_frame_equal(result, expected_df)
+    assert_frame_equal(result, expected_df)

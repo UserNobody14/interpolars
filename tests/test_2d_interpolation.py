@@ -1,4 +1,5 @@
 import polars as pl
+from polars.testing import assert_frame_equal
 
 from interpolars import interpolate_nd
 
@@ -13,9 +14,10 @@ def get_target_df():
     """
     return pl.DataFrame(
         {
-            "xfield": [0, 1, 1.25, 1.5],
-            "yfield": [1, 0, 0.5, 2],
-            "labels": ["a", "b", "c", "d"],
+            "xfield": [0.0, 1.0, 1.25, 1.5],
+            "yfield": [1.0, 0.0, 0.5, 2.0],
+            # Imaginary labels
+            # "labels": ["a", "b", "c", "d"],
         }
         # Make x column a struct with a single field "xfield"
     ).with_columns(pl.struct([pl.col("xfield"), pl.col("yfield")]).alias("x"))
@@ -57,32 +59,32 @@ def get_source_df():
     return pl.DataFrame(
         {
             "xfield": [
-                0,
-                0,
-                0,
-                1,
-                1,
-                1,
-                2,
-                2,
-                2,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                2.0,
+                2.0,
+                2.0,
             ],
-            "yfield": [0, 1, 2, 0, 1, 2, 0, 1, 2],
+            "yfield": [0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
             "valuefield": [
-                0,
-                100,
-                200,
-                100,
-                200,
-                300,
-                200,
-                300,
-                400,
+                0.0,
+                100.0,
+                200.0,
+                100.0,
+                200.0,
+                300.0,
+                200.0,
+                300.0,
+                400.0,
             ],
         }
         # Make x column a struct with a single field "xfield"
     ).with_columns(
-        {
+        **{
             "x": pl.struct([pl.col("xfield"), pl.col("yfield")]),
             "value": pl.struct([pl.col("valuefield")]),
         }
@@ -96,12 +98,13 @@ def test_2d_interpolation():
     """
     target_df = get_target_df()
     source_df = get_source_df()
-    result = target_df.with_columns(
-        {"interpolated": interpolate_nd(pl.col("x"), source_df)}
+    result = source_df.with_columns(
+        **{"interpolated": interpolate_nd(pl.col("x"), pl.col("value"), target_df)}
     )
+    result = result.select(["xfield", "yfield", "x", "interpolated"])
     expected_values = [
         # (0, 1) is exactly on a source grid point
-        100,
+        100.0,
         # (1, 0) is exactly on a source grid point
         100,
         # Bilinear interpolation inside the unit square:
@@ -114,9 +117,10 @@ def test_2d_interpolation():
     expected_df = (
         pl.DataFrame(
             {
-                "xfield": [0, 1, 1.25, 1.5],
-                "yfield": [1, 0, 0.5, 2],
-                "labels": ["a", "b", "c", "d"],
+                "xfield": [0.0, 1.0, 1.25, 1.5],
+                "yfield": [1.0, 0.0, 0.5, 2.0],
+                # Imaginary labels
+                # "labels": ["a", "b", "c", "d"],
                 "interpolated": expected_values,
             }
         )
@@ -126,6 +130,6 @@ def test_2d_interpolation():
                 "interpolated"
             )
         )
-        .select(["xfield", "yfield", "labels", "x", "interpolated"])
+        .select(["xfield", "yfield", "x", "interpolated"])
     )
-    pl.testing.assert_frame_equal(result, expected_df)
+    assert_frame_equal(result, expected_df)

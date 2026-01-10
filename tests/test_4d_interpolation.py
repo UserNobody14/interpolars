@@ -22,7 +22,8 @@ def get_target_df():
             "yfield": [0.0, 1.0, 0.5, 0.75, 0.0],
             "zfield": [0.0, 1.0, 0.5, 0.5, 0.5],
             "wfield": [0.0, 1.0, 0.5, 0.125, 1.0],
-            "labels": ["a", "b", "c", "d", "e"],
+            # Imaginary labels
+            # "labels": ["a", "b", "c", "d", "e"],
         }
     ).with_columns(
         pl.struct(
@@ -69,11 +70,12 @@ def test_4d_interpolation():
     """
     target_df = get_target_df()
     source_df = get_source_df()
-
-    result = target_df.with_columns(
-        **{"interpolated": interpolate_nd(pl.col("x"), source_df)}
+    result = source_df.with_columns(
+        **{"interpolated": interpolate_nd(pl.col("x"), pl.col("value"), target_df)}
     )
-
+    result = result.select(
+        ["xfield", "yfield", "zfield", "wfield", "x", "interpolated"]
+    )
     expected_values = [
         100.0,  # (0, 0, 0, 0)
         200.0,  # (1, 1, 1, 1)
@@ -89,7 +91,8 @@ def test_4d_interpolation():
                 "yfield": [0.0, 1.0, 0.5, 0.75, 0.0],
                 "zfield": [0.0, 1.0, 0.5, 0.5, 0.5],
                 "wfield": [0.0, 1.0, 0.5, 0.125, 1.0],
-                "labels": ["a", "b", "c", "d", "e"],
+                # Imaginary labels
+                # "labels": ["a", "b", "c", "d", "e"],
                 "interpolated": expected_values,
             }
         )
@@ -103,7 +106,7 @@ def test_4d_interpolation():
                 "interpolated"
             )
         )
-        .select(["xfield", "yfield", "zfield", "wfield", "labels", "x", "interpolated"])
+        .select(["xfield", "yfield", "zfield", "wfield", "x", "interpolated"])
     )
 
     assert_frame_equal(result, expected_df)
