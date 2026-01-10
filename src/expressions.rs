@@ -8,16 +8,50 @@ struct InterpolateNdArgs {
     interp_target: DataFrame,
 }
 
-/// Output type matches the value-struct input (2nd input).
+/// Output type is a concatenation of:
+/// - the passthrough target struct schema (3rd input)
+/// - the value-struct input (2nd input)
 fn same_output_type(input_fields: &[Field]) -> PolarsResult<Field> {
-    let field = &input_fields[1];
-    match field.dtype() {
-        DataType::Struct(fields) => Ok(Field::new(
-            "interpolated".into(),
-            DataType::Struct(fields.clone()),
-        )),
-        dtype => polars_bail!(InvalidOperation: "expected Struct dtype, got {}", dtype),
+    if input_fields.len() < 3 {
+        polars_bail!(
+            InvalidOperation:
+            "expected 3 inputs (coords struct, values struct, target schema struct), got {}",
+            input_fields.len()
+        );
     }
+
+    let value_field = &input_fields[1];
+    let target_schema_field = &input_fields[2];
+
+    let DataType::Struct(value_fields) = value_field.dtype() else {
+        polars_bail!(
+            InvalidOperation:
+            "expected Struct dtype for values input, got {}",
+            value_field.dtype()
+        );
+    };
+    let DataType::Struct(target_fields) = target_schema_field.dtype() else {
+        polars_bail!(
+            InvalidOperation:
+            "expected Struct dtype for target schema input, got {}",
+            target_schema_field.dtype()
+        );
+    };
+
+    let mut out_fields: Vec<Field> = Vec::with_capacity(target_fields.len() + value_fields.len());
+    out_fields.extend(target_fields.iter().cloned());
+    for f in value_fields {
+        if out_fields.iter().any(|existing| existing.name == f.name) {
+            polars_bail!(
+                InvalidOperation:
+                "duplicate output field name {} (present in interp_target and values)",
+                f.name
+            );
+        }
+        out_fields.push(f.clone());
+    }
+
+    Ok(Field::new("interpolated".into(), DataType::Struct(out_fields)))
 }
 
 fn series_to_f64_vec(s: &Series) -> PolarsResult<Vec<f64>> {
@@ -63,11 +97,12 @@ fn lower_upper_indices(axis: &[f64], t: f64) -> (usize, usize) {
 fn interpolate_nd(inputs: &[Series], kwargs: InterpolateNdArgs) -> PolarsResult<Series> {
     // inputs[0]: source coordinates as a Struct (e.g. {xfield, yfield, ...})
     // inputs[1]: source values as a Struct (e.g. {valuefield, ...})
-    // kwargs.interp_target: target DataFrame containing target coordinates; expects columns matching
-    // the coord struct field names (or a struct column `x` with those fields).
+    // inputs[2]: dummy target schema struct (names + dtypes of all columns to passthrough)
+    // kwargs.interp_target: target DataFrame containing target coordinates + metadata columns.
 
     let source_coords = inputs[0].struct_()?;
     let source_values = inputs[1].struct_()?;
+    let target_schema = inputs[2].struct_()?;
     let interp_target = kwargs.interp_target;
 
     let coord_fields = source_coords.fields_as_series();
@@ -206,8 +241,27 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateNdArgs) -> PolarsResult<
         }
     }
 
-    // Build output struct series with same field names as the input value struct.
-    let mut out_fields: Vec<Series> = Vec::with_capacity(value_names.len());
+    // Build output struct series:
+    // - passthrough columns from interp_target (in the order described by `target_schema`)
+    // - interpolated value columns
+    let mut out_fields: Vec<Series> = Vec::with_capacity(target_schema.fields_as_series().len() + value_names.len());
+
+    let passthrough_fields = target_schema.fields_as_series();
+    for s in &passthrough_fields {
+        let name = s.name();
+        if value_names.iter().any(|v| v == name) {
+            polars_bail!(
+                InvalidOperation:
+                "duplicate output field name {} (present in interp_target and values)",
+                name
+            );
+        }
+        let col = interp_target.column(name).map_err(|_| {
+            polars_err!(InvalidOperation: "interp_target missing column {}", name)
+        })?;
+        out_fields.push(col.as_materialized_series().clone());
+    }
+
     for (name, vals) in value_names.iter().zip(out_value_cols.into_iter()) {
         out_fields.push(Series::new(name.as_str().into(), vals));
     }

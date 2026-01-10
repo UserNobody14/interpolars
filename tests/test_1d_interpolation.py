@@ -38,14 +38,11 @@ def test_1d_interpolation():
     """
     target_df = get_target_df()
     source_df = get_source_df()
-    interpolated_df = (
+    result = (
         source_df.lazy()
-        .select(
-            interpolate_nd(["xfield"], ["valuefield"], target_df).alias("interpolated")
-        )
+        .select(interpolate_nd(["xfield"], ["valuefield"], target_df))
         .collect()
     )
-    result = target_df.hstack(interpolated_df).select(["xfield", "interpolated"])
     xs = [0.1, 1, 2.5, 3.5, 4.5, 5.5, 8, 8.5, 8.75, 10]
     expected_values = [
         # Between (0, 100) and (7, 200)
@@ -64,12 +61,10 @@ def test_1d_interpolation():
     ]
 
     expected_df = (
-        pl.DataFrame({"xfield": xs, "interpolated": expected_values})
+        pl.DataFrame({"xfield": xs, "valuefield": expected_values})
         .with_columns(
-            pl.struct([pl.col("interpolated").alias("valuefield")]).alias(
-                "interpolated"
-            )
+            pl.struct([pl.col("xfield"), pl.col("valuefield")]).alias("interpolated")
         )
-        .select(["xfield", "interpolated"])
+        .select(["interpolated"])
     )
     assert_frame_equal(result, expected_df)

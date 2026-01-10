@@ -57,17 +57,14 @@ def test_4d_interpolation():
     """
     target_df = get_target_df()
     source_df = get_source_df()
-    interpolated_df = (
+    result = (
         source_df.lazy()
         .select(
             interpolate_nd(
                 ["xfield", "yfield", "zfield", "wfield"], ["valuefield"], target_df
-            ).alias("interpolated")
+            )
         )
         .collect()
-    )
-    result = target_df.hstack(interpolated_df).select(
-        ["xfield", "yfield", "zfield", "wfield", "interpolated"]
     )
     expected_values = [
         100.0,  # (0, 0, 0, 0)
@@ -86,15 +83,21 @@ def test_4d_interpolation():
                 "wfield": [0.0, 1.0, 0.5, 0.125, 1.0],
                 # Imaginary labels
                 # "labels": ["a", "b", "c", "d", "e"],
-                "interpolated": expected_values,
+                "valuefield": expected_values,
             }
         )
         .with_columns(
-            pl.struct([pl.col("interpolated").alias("valuefield")]).alias(
-                "interpolated"
-            )
+            pl.struct(
+                [
+                    pl.col("xfield"),
+                    pl.col("yfield"),
+                    pl.col("zfield"),
+                    pl.col("wfield"),
+                    pl.col("valuefield"),
+                ]
+            ).alias("interpolated")
         )
-        .select(["xfield", "yfield", "zfield", "wfield", "interpolated"])
+        .select(["interpolated"])
     )
 
     assert_frame_equal(result, expected_df)

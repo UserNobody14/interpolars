@@ -29,6 +29,9 @@ def interpolate_nd(
     Notes:
     - The adaptor wraps the provided coords/values into structs internally:
       `pl.struct(expr_cols_or_exprs)` and `pl.struct(value_cols_or_exprs)`.
+    - The returned expression evaluates to a **single struct** that contains:
+      - all columns from `interp_target` (coords + metadata)
+      - all interpolated value fields
     - This plugin **changes length**: the output length equals `interp_target.height()`.
     """
 
@@ -42,13 +45,21 @@ def interpolate_nd(
     else:
         value_struct = pl.struct([value_cols_or_exprs])
 
+    # Provide a dummy struct with the schema of `interp_target` so the Rust plugin can
+    # compute a stable output dtype (including passthrough metadata columns).
+    target_schema_exprs: list[pl.Expr] = []
+    for name in interp_target.columns:
+        dtype = interp_target.schema[name]
+        target_schema_exprs.append(pl.lit(None).cast(dtype).alias(name))
+    target_schema_struct = pl.struct(target_schema_exprs)
+
     return register_plugin_function(
         plugin_path=PLUGIN_PATH,
         function_name="interpolate_nd",
-        args=[coord_struct, value_struct],
+        args=[coord_struct, value_struct, target_schema_struct],
         kwargs={
             "interp_target": interp_target,
         },
         is_elementwise=False,
         changes_length=True,
-    )
+    ).alias("interpolated")

@@ -13,8 +13,7 @@ def get_target_df():
         {
             "xfield": [0.0, 1.0, 1.25, 1.5],
             "yfield": [1.0, 0.0, 0.5, 2.0],
-            # Imaginary labels
-            # "labels": ["a", "b", "c", "d"],
+            "labels": ["a", "b", "c", "d"],
         }
     )
 
@@ -89,17 +88,10 @@ def test_2d_interpolation():
     """
     target_df = get_target_df()
     source_df = get_source_df()
-    interpolated_df = (
+    result = (
         source_df.lazy()
-        .select(
-            interpolate_nd(["xfield", "yfield"], ["valuefield"], target_df).alias(
-                "interpolated"
-            )
-        )
+        .select(interpolate_nd(["xfield", "yfield"], ["valuefield"], target_df))
         .collect()
-    )
-    result = target_df.hstack(interpolated_df).select(
-        ["xfield", "yfield", "interpolated"]
     )
     expected_values = [
         # (0, 1) is exactly on a source grid point
@@ -118,16 +110,20 @@ def test_2d_interpolation():
             {
                 "xfield": [0.0, 1.0, 1.25, 1.5],
                 "yfield": [1.0, 0.0, 0.5, 2.0],
-                # Imaginary labels
-                # "labels": ["a", "b", "c", "d"],
-                "interpolated": expected_values,
+                "labels": ["a", "b", "c", "d"],
+                "valuefield": expected_values,
             }
         )
         .with_columns(
-            pl.struct([pl.col("interpolated").alias("valuefield")]).alias(
-                "interpolated"
-            )
+            pl.struct(
+                [
+                    pl.col("xfield"),
+                    pl.col("yfield"),
+                    pl.col("labels"),
+                    pl.col("valuefield"),
+                ]
+            ).alias("interpolated")
         )
-        .select(["xfield", "yfield", "interpolated"])
+        .select(["interpolated"])
     )
     assert_frame_equal(result, expected_df)

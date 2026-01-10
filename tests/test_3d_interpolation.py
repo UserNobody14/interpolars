@@ -52,17 +52,12 @@ def test_3d_interpolation():
     """
     target_df = get_target_df()
     source_df = get_source_df()
-    interpolated_df = (
+    result = (
         source_df.lazy()
         .select(
-            interpolate_nd(
-                ["xfield", "yfield", "zfield"], ["valuefield"], target_df
-            ).alias("interpolated")
+            interpolate_nd(["xfield", "yfield", "zfield"], ["valuefield"], target_df)
         )
         .collect()
-    )
-    result = target_df.hstack(interpolated_df).select(
-        ["xfield", "yfield", "zfield", "interpolated"]
     )
     expected_values = [
         100.0,  # (0, 0, 0)
@@ -81,15 +76,20 @@ def test_3d_interpolation():
                 "zfield": [0.0, 0.0, 0.0, 1.0, 0.5, 0.5],
                 # Imaginary labels
                 # "labels": ["a", "b", "c", "d", "e", "f"],
-                "interpolated": expected_values,
+                "valuefield": expected_values,
             }
         )
         .with_columns(
-            pl.struct([pl.col("interpolated").alias("valuefield")]).alias(
-                "interpolated"
-            )
+            pl.struct(
+                [
+                    pl.col("xfield"),
+                    pl.col("yfield"),
+                    pl.col("zfield"),
+                    pl.col("valuefield"),
+                ]
+            ).alias("interpolated")
         )
-        .select(["xfield", "yfield", "zfield", "interpolated"])
+        .select(["interpolated"])
     )
 
     assert_frame_equal(result, expected_df)
