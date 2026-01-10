@@ -70,10 +70,16 @@ def test_4d_interpolation():
     """
     target_df = get_target_df()
     source_df = get_source_df()
-    result = source_df.with_columns(
-        **{"interpolated": interpolate_nd(pl.col("x"), pl.col("value"), target_df)}
+    interpolated_df = (
+        source_df.lazy()
+        .select(
+            interpolate_nd(pl.col("x"), pl.col("value"), target_df).alias(
+                "interpolated"
+            )
+        )
+        .collect()
     )
-    result = result.select(
+    result = target_df.hstack(interpolated_df).select(
         ["xfield", "yfield", "zfield", "wfield", "x", "interpolated"]
     )
     expected_values = [

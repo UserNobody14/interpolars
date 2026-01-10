@@ -98,10 +98,18 @@ def test_2d_interpolation():
     """
     target_df = get_target_df()
     source_df = get_source_df()
-    result = source_df.with_columns(
-        **{"interpolated": interpolate_nd(pl.col("x"), pl.col("value"), target_df)}
+    interpolated_df = (
+        source_df.lazy()
+        .select(
+            interpolate_nd(pl.col("x"), pl.col("value"), target_df).alias(
+                "interpolated"
+            )
+        )
+        .collect()
     )
-    result = result.select(["xfield", "yfield", "x", "interpolated"])
+    result = target_df.hstack(interpolated_df).select(
+        ["xfield", "yfield", "x", "interpolated"]
+    )
     expected_values = [
         # (0, 1) is exactly on a source grid point
         100.0,
