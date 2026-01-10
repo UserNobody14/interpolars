@@ -1,0 +1,36 @@
+[package]
+name = "interpolars"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "_core"
+# "cdylib" is necessary to produce a shared library for Python to import from.
+crate-type = ["cdylib"]
+
+[dependencies]
+# "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
+# "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
+pyo3 = { version = "0.26.0", features = ["extension-module", "abi3-py39"] }
+# Get polars from git
+polars = { git = "https://github.com/pola-rs/polars.git", tag = "py-1.36.1", features = [
+    # Match Python Polars' enabled DSL surface area; otherwise Expr serialization can decode
+    # to the wrong FunctionExpr variants (feature-gated enum variant index drift).
+    # "docs-selection",
+    # "performant",
+    "is_between",
+    "is_in",
+    "lazy",
+    "dtype-extension",
+    "dtype-full",
+] }
+pyo3-polars = { git = "https://github.com/pola-rs/polars.git", tag = "py-1.36.1", features = [
+    "object",
+    "dtype-extension",
+    "derive",
+    "lazy",
+    "dtype-full",
+] }
+
+serde_json = "1.0.145"
+serde = "1.0.213"
