@@ -99,7 +99,33 @@ def test_2d_interpolation():
     result = target_df.with_columns(
         {"interpolated": interpolate_nd(pl.col("x"), source_df)}
     )
-    result_df = pl.DataFrame({}).with_columns(
-        pl.struct([pl.col("interpolated")]).alias("interpolated")
+    expected_values = [
+        # (0, 1) is exactly on a source grid point
+        100,
+        # (1, 0) is exactly on a source grid point
+        100,
+        # Bilinear interpolation inside the unit square:
+        # z = 100*(x + y) on the provided grid, so expected is 100*(1.25 + 0.5) = 175
+        175,
+        # Linear along y=2 between x=1 (300) and x=2 (400): at x=1.5 => 350
+        350,
+    ]
+
+    expected_df = (
+        pl.DataFrame(
+            {
+                "xfield": [0, 1, 1.25, 1.5],
+                "yfield": [1, 0, 0.5, 2],
+                "labels": ["a", "b", "c", "d"],
+                "interpolated": expected_values,
+            }
+        )
+        .with_columns(pl.struct([pl.col("xfield"), pl.col("yfield")]).alias("x"))
+        .with_columns(
+            pl.struct([pl.col("interpolated").alias("valuefield")]).alias(
+                "interpolated"
+            )
+        )
+        .select(["xfield", "yfield", "labels", "x", "interpolated"])
     )
-    pl.testing.assert_frame_equal(result, result_df)
+    pl.testing.assert_frame_equal(result, expected_df)

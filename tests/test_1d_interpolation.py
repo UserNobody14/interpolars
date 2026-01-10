@@ -48,23 +48,31 @@ def test_1d_interpolation():
     result = target_df.with_columns(
         {"interpolated": interpolate_nd(pl.col("x"), source_df)}
     )
-    result_df = pl.DataFrame(
-        {
-            "x": [0.1, 1, 2.5, 3.5, 4.5, 5.5, 8, 8.5, 8.75, 10],
-            "interpolated": [
-                # First few between 0 and 7
-                (0.1 / 7) * 100,
-                (1 / 7) * 100,
-                (2.5 / 7) * 100,
-                (3.5 / 7) * 100,
-                (4.5 / 7) * 100,
-                (5.5 / 7) * 100,
-                # Last few between the other points
-                300,  # Precisely 300 (on 8)
-                350,  # 300 + (8.5 - 8) * (400 - 300) / (8.5 - 8)
-                375,  # 300 + (8.75 - 8) * (400 - 300) / (8.75 - 8)
-                500,  # Precisely 500
-            ],
-        }
-    ).with_columns(pl.struct([pl.col("interpolated")]).alias("interpolated"))
-    pl.testing.assert_frame_equal(result, result_df)
+    xs = [0.1, 1, 2.5, 3.5, 4.5, 5.5, 8, 8.5, 8.75, 10]
+    expected_values = [
+        # Between (0, 100) and (7, 200)
+        100 + (0.1 - 0) * (200 - 100) / (7 - 0),
+        100 + (1 - 0) * (200 - 100) / (7 - 0),
+        100 + (2.5 - 0) * (200 - 100) / (7 - 0),
+        100 + (3.5 - 0) * (200 - 100) / (7 - 0),
+        100 + (4.5 - 0) * (200 - 100) / (7 - 0),
+        100 + (5.5 - 0) * (200 - 100) / (7 - 0),
+        # Between (8, 300) and (9, 400)
+        300,  # Precisely 300 (on 8)
+        300 + (8.5 - 8) * (400 - 300) / (9 - 8),
+        300 + (8.75 - 8) * (400 - 300) / (9 - 8),
+        # Precisely on 10
+        500,
+    ]
+
+    expected_df = (
+        pl.DataFrame({"xfield": xs, "interpolated": expected_values})
+        .with_columns(pl.struct([pl.col("xfield")]).alias("x"))
+        .with_columns(
+            pl.struct([pl.col("interpolated").alias("valuefield")]).alias(
+                "interpolated"
+            )
+        )
+        .select(["xfield", "x", "interpolated"])
+    )
+    pl.testing.assert_frame_equal(result, expected_df)
