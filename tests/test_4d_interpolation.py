@@ -1,6 +1,7 @@
 import itertools
 
 import polars as pl
+from polars.testing import assert_frame_equal
 
 from interpolars import interpolate_nd
 
@@ -52,7 +53,7 @@ def get_source_df():
     return pl.DataFrame(
         {"xfield": xf, "yfield": yf, "zfield": zf, "wfield": wf, "valuefield": vf}
     ).with_columns(
-        {
+        **{
             "x": pl.struct(
                 [pl.col("xfield"), pl.col("yfield"), pl.col("zfield"), pl.col("wfield")]
             ),
@@ -69,7 +70,9 @@ def test_4d_interpolation():
     target_df = get_target_df()
     source_df = get_source_df()
 
-    result = target_df.with_columns({"interpolated": interpolate_nd(pl.col("x"), source_df)})
+    result = target_df.with_columns(
+        **{"interpolated": interpolate_nd(pl.col("x"), source_df)}
+    )
 
     expected_values = [
         100.0,  # (0, 0, 0, 0)
@@ -96,10 +99,11 @@ def test_4d_interpolation():
             ).alias("x")
         )
         .with_columns(
-            pl.struct([pl.col("interpolated").alias("valuefield")]).alias("interpolated")
+            pl.struct([pl.col("interpolated").alias("valuefield")]).alias(
+                "interpolated"
+            )
         )
         .select(["xfield", "yfield", "zfield", "wfield", "labels", "x", "interpolated"])
     )
 
-    pl.testing.assert_frame_equal(result, expected_df)
-
+    assert_frame_equal(result, expected_df)

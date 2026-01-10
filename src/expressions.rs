@@ -24,7 +24,7 @@ fn same_output_type(input_fields: &[Field]) -> PolarsResult<Field> {
 #[polars_expr(output_type_func=same_output_type)]
 fn interpolate_nd(inputs: &[Series], kwargs: InterpolateNdArgs) -> PolarsResult<Series> {
     // Get the interp_source (struct) and interp_target (DataFrame)
-    let interp_source = inputs[0];
+    let interp_source = inputs[0].clone();
     // let interp_target = kwargs.interp_target;
     // // Get the fields of the interp_source
     // let interp_source_fields = interp_source.struct_()?.fields();

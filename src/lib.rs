@@ -14,6 +14,7 @@ mod _core {
     fn hello_from_bin() -> String {
         "Hello from interpolars!".to_string()
     }
+
     #[global_allocator]
     static ALLOC: PolarsAllocator = PolarsAllocator::new();
 }
