@@ -3,6 +3,11 @@ from polars.expr import IntoExprColumn
 
 def hello_from_bin() -> str: ...
 def interpolate_nd(
-    expr: IntoExprColumn,
+    expr_cols_or_exprs: IntoExprColumn
+    | list[IntoExprColumn]
+    | tuple[IntoExprColumn, ...],
+    value_cols_or_exprs: IntoExprColumn
+    | list[IntoExprColumn]
+    | tuple[IntoExprColumn, ...],
     interp_target: pl.DataFrame,
 ) -> pl.Expr: ...

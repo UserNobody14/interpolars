@@ -115,32 +115,15 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateNdArgs) -> PolarsResult<
         .map(series_to_f64_vec)
         .collect::<PolarsResult<_>>()?;
 
-    // Extract target coordinates (either `x` struct or individual columns)
+    // Extract target coordinates from individual columns on interp_target.
     let target_n = interp_target.height();
-    let target_coord_cols: Vec<Vec<f64>> = if let Ok(target_x) = interp_target.column("x") {
-        let target_x = target_x.as_materialized_series().struct_()?;
-        let fields = target_x.fields_as_series();
-        let mut out: Vec<Vec<f64>> = Vec::with_capacity(dims);
-        for name in &dim_names {
-            let s = fields
-                .iter()
-                .find(|f| f.name() == name.as_str())
-                .ok_or_else(|| {
-                    polars_err!(InvalidOperation: "interp_target.x missing field {}", name)
-                })?;
-            out.push(series_to_f64_vec(s)?);
-        }
-        out
-    } else {
-        let mut out: Vec<Vec<f64>> = Vec::with_capacity(dims);
-        for name in &dim_names {
-            let s = interp_target.column(name).map_err(|_| {
-                polars_err!(InvalidOperation: "interp_target missing column {}", name)
-            })?;
-            out.push(series_to_f64_vec(s.as_materialized_series())?);
-        }
-        out
-    };
+    let mut target_coord_cols: Vec<Vec<f64>> = Vec::with_capacity(dims);
+    for name in &dim_names {
+        let s = interp_target.column(name).map_err(|_| {
+            polars_err!(InvalidOperation: "interp_target missing column {}", name)
+        })?;
+        target_coord_cols.push(series_to_f64_vec(s.as_materialized_series())?);
+    }
 
     // Interpolate each target row
     let mut out_value_cols: Vec<Vec<f64>> = value_names

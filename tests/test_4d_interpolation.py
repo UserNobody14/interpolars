@@ -9,11 +9,6 @@ from interpolars import interpolate_nd
 def get_target_df():
     """
     Get a target DataFrame for 4D interpolation.
-    Everything is in a 4 field struct called "x" with the fields:
-    - xfield: a float
-    - yfield: a float
-    - zfield: a float
-    - wfield: a float
     Target points are all inside the unit hypercube [0, 1]^4 (including corners).
     """
     return pl.DataFrame(
@@ -25,19 +20,18 @@ def get_target_df():
             # Imaginary labels
             # "labels": ["a", "b", "c", "d", "e"],
         }
-    ).with_columns(
-        pl.struct(
-            [pl.col("xfield"), pl.col("yfield"), pl.col("zfield"), pl.col("wfield")]
-        ).alias("x")
     )
 
 
 def get_source_df():
     """
     Get a source DataFrame for 4D interpolation.
-    Source df has two fields:
-    - x: a struct with the fields "xfield", "yfield", "zfield", and "wfield"
-    - value: a struct with a single field "valuefield"
+    Source df has five columns:
+    - xfield
+    - yfield
+    - zfield
+    - wfield
+    - valuefield
 
     The source points are all 16 corners of the unit hypercube [0, 1]^4.
     The underlying function is affine:
@@ -53,13 +47,6 @@ def get_source_df():
 
     return pl.DataFrame(
         {"xfield": xf, "yfield": yf, "zfield": zf, "wfield": wf, "valuefield": vf}
-    ).with_columns(
-        **{
-            "x": pl.struct(
-                [pl.col("xfield"), pl.col("yfield"), pl.col("zfield"), pl.col("wfield")]
-            ),
-            "value": pl.struct([pl.col("valuefield")]),
-        }
     )
 
 
@@ -73,14 +60,14 @@ def test_4d_interpolation():
     interpolated_df = (
         source_df.lazy()
         .select(
-            interpolate_nd(pl.col("x"), pl.col("value"), target_df).alias(
-                "interpolated"
-            )
+            interpolate_nd(
+                ["xfield", "yfield", "zfield", "wfield"], ["valuefield"], target_df
+            ).alias("interpolated")
         )
         .collect()
     )
     result = target_df.hstack(interpolated_df).select(
-        ["xfield", "yfield", "zfield", "wfield", "x", "interpolated"]
+        ["xfield", "yfield", "zfield", "wfield", "interpolated"]
     )
     expected_values = [
         100.0,  # (0, 0, 0, 0)
@@ -103,16 +90,11 @@ def test_4d_interpolation():
             }
         )
         .with_columns(
-            pl.struct(
-                [pl.col("xfield"), pl.col("yfield"), pl.col("zfield"), pl.col("wfield")]
-            ).alias("x")
-        )
-        .with_columns(
             pl.struct([pl.col("interpolated").alias("valuefield")]).alias(
                 "interpolated"
             )
         )
-        .select(["xfield", "yfield", "zfield", "wfield", "x", "interpolated"])
+        .select(["xfield", "yfield", "zfield", "wfield", "interpolated"])
     )
 
     assert_frame_equal(result, expected_df)

@@ -9,10 +9,6 @@ from interpolars import interpolate_nd
 def get_target_df():
     """
     Get a target DataFrame for 3D interpolation.
-    Everything is in a 3 field struct called "x" with the fields:
-    - xfield: a float
-    - yfield: a float
-    - zfield: a float
     Target points are all inside the unit cube [0, 1]^3 (including corners).
     """
     return pl.DataFrame(
@@ -23,17 +19,17 @@ def get_target_df():
             # Imaginary labels
             # "labels": ["a", "b", "c", "d", "e", "f"],
         }
-    ).with_columns(
-        pl.struct([pl.col("xfield"), pl.col("yfield"), pl.col("zfield")]).alias("x")
     )
 
 
 def get_source_df():
     """
     Get a source DataFrame for 3D interpolation.
-    Source df has two fields:
-    - x: a struct with the fields "xfield", "yfield", and "zfield"
-    - value: a struct with a single field "valuefield"
+    Source df has four columns:
+    - xfield
+    - yfield
+    - zfield
+    - valuefield
 
     The source points are all 8 corners of the unit cube [0, 1]^3.
     The underlying function is affine:
@@ -46,14 +42,7 @@ def get_source_df():
     zf = [c[2] for c in coords]
     vf = [100 + 10 * x + 20 * y + 30 * z for x, y, z in coords]
 
-    return pl.DataFrame(
-        {"xfield": xf, "yfield": yf, "zfield": zf, "valuefield": vf}
-    ).with_columns(
-        **{
-            "x": pl.struct([pl.col("xfield"), pl.col("yfield"), pl.col("zfield")]),
-            "value": pl.struct([pl.col("valuefield")]),
-        }
-    )
+    return pl.DataFrame({"xfield": xf, "yfield": yf, "zfield": zf, "valuefield": vf})
 
 
 def test_3d_interpolation():
@@ -66,14 +55,14 @@ def test_3d_interpolation():
     interpolated_df = (
         source_df.lazy()
         .select(
-            interpolate_nd(pl.col("x"), pl.col("value"), target_df).alias(
-                "interpolated"
-            )
+            interpolate_nd(
+                ["xfield", "yfield", "zfield"], ["valuefield"], target_df
+            ).alias("interpolated")
         )
         .collect()
     )
     result = target_df.hstack(interpolated_df).select(
-        ["xfield", "yfield", "zfield", "x", "interpolated"]
+        ["xfield", "yfield", "zfield", "interpolated"]
     )
     expected_values = [
         100.0,  # (0, 0, 0)
@@ -96,14 +85,11 @@ def test_3d_interpolation():
             }
         )
         .with_columns(
-            pl.struct([pl.col("xfield"), pl.col("yfield"), pl.col("zfield")]).alias("x")
-        )
-        .with_columns(
             pl.struct([pl.col("interpolated").alias("valuefield")]).alias(
                 "interpolated"
             )
         )
-        .select(["xfield", "yfield", "zfield", "x", "interpolated"])
+        .select(["xfield", "yfield", "zfield", "interpolated"])
     )
 
     assert_frame_equal(result, expected_df)

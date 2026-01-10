@@ -7,9 +7,6 @@ from interpolars import interpolate_nd
 def get_target_df():
     """
     Get a target DataFrame for 1D interpolation.
-    Everything is in a 2 field struct called "x" with the fields:
-    - xfield: a float
-    - yfield: a float
     Everything on the source df is between 0 and 2
     """
     return pl.DataFrame(
@@ -19,8 +16,7 @@ def get_target_df():
             # Imaginary labels
             # "labels": ["a", "b", "c", "d"],
         }
-        # Make x column a struct with a single field "xfield"
-    ).with_columns(pl.struct([pl.col("xfield"), pl.col("yfield")]).alias("x"))
+    )
 
 
 # ----------
@@ -51,9 +47,10 @@ def get_target_df():
 def get_source_df():
     """
     Get a source DataFrame for 1D interpolation.
-    Source df has two field:
-    - x: a struct with the fields "xfield" and "yfield"
-    - value: a struct with a single field "valuefield"
+    Source df has three columns:
+    - xfield
+    - yfield
+    - valuefield
     Everything on the source df's xfield and yfield is between 0 and 2
     """
     return pl.DataFrame(
@@ -82,12 +79,6 @@ def get_source_df():
                 400.0,
             ],
         }
-        # Make x column a struct with a single field "xfield"
-    ).with_columns(
-        **{
-            "x": pl.struct([pl.col("xfield"), pl.col("yfield")]),
-            "value": pl.struct([pl.col("valuefield")]),
-        }
     )
 
 
@@ -101,14 +92,14 @@ def test_2d_interpolation():
     interpolated_df = (
         source_df.lazy()
         .select(
-            interpolate_nd(pl.col("x"), pl.col("value"), target_df).alias(
+            interpolate_nd(["xfield", "yfield"], ["valuefield"], target_df).alias(
                 "interpolated"
             )
         )
         .collect()
     )
     result = target_df.hstack(interpolated_df).select(
-        ["xfield", "yfield", "x", "interpolated"]
+        ["xfield", "yfield", "interpolated"]
     )
     expected_values = [
         # (0, 1) is exactly on a source grid point
@@ -132,12 +123,11 @@ def test_2d_interpolation():
                 "interpolated": expected_values,
             }
         )
-        .with_columns(pl.struct([pl.col("xfield"), pl.col("yfield")]).alias("x"))
         .with_columns(
             pl.struct([pl.col("interpolated").alias("valuefield")]).alias(
                 "interpolated"
             )
         )
-        .select(["xfield", "yfield", "x", "interpolated"])
+        .select(["xfield", "yfield", "interpolated"])
     )
     assert_frame_equal(result, expected_df)
