@@ -1,12 +1,6 @@
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
-use serde::Deserialize;
 use std::collections::HashMap;
-
-#[derive(Deserialize)]
-struct InterpolateNdArgs {
-    interp_target: DataFrame,
-}
 
 /// Output type is a concatenation of:
 /// - the passthrough target struct schema (3rd input)
@@ -94,16 +88,15 @@ fn lower_upper_indices(axis: &[f64], t: f64) -> (usize, usize) {
 }
 
 #[polars_expr(output_type_func=same_output_type)]
-fn interpolate_nd(inputs: &[Series], kwargs: InterpolateNdArgs) -> PolarsResult<Series> {
+fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
     // inputs[0]: source coordinates as a Struct (e.g. {xfield, yfield, ...})
     // inputs[1]: source values as a Struct (e.g. {valuefield, ...})
-    // inputs[2]: dummy target schema struct (names + dtypes of all columns to passthrough)
-    // kwargs.interp_target: target DataFrame containing target coordinates + metadata columns.
+    // inputs[2]: target rows as a Struct Series where each field is a column from interp_target
+    //          (coordinates + any passthrough metadata columns).
 
     let source_coords = inputs[0].struct_()?;
     let source_values = inputs[1].struct_()?;
-    let target_schema = inputs[2].struct_()?;
-    let interp_target = kwargs.interp_target;
+    let interp_target = inputs[2].struct_()?;
 
     let coord_fields = source_coords.fields_as_series();
     if coord_fields.is_empty() {
@@ -150,14 +143,15 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateNdArgs) -> PolarsResult<
         .map(series_to_f64_vec)
         .collect::<PolarsResult<_>>()?;
 
-    // Extract target coordinates from individual columns on interp_target.
-    let target_n = interp_target.height();
+    // Extract target coordinates from fields on interp_target struct series.
+    let target_n = interp_target.len();
     let mut target_coord_cols: Vec<Vec<f64>> = Vec::with_capacity(dims);
+    let target_fields = interp_target.fields_as_series();
     for name in &dim_names {
-        let s = interp_target.column(name).map_err(|_| {
-            polars_err!(InvalidOperation: "interp_target missing column {}", name)
+        let s = target_fields.iter().find(|s| s.name() == name).ok_or_else(|| {
+            polars_err!(InvalidOperation: "interp_target missing field {}", name)
         })?;
-        target_coord_cols.push(series_to_f64_vec(s.as_materialized_series())?);
+        target_coord_cols.push(series_to_f64_vec(s)?);
     }
 
     // Interpolate each target row
@@ -244,10 +238,9 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateNdArgs) -> PolarsResult<
     // Build output struct series:
     // - passthrough columns from interp_target (in the order described by `target_schema`)
     // - interpolated value columns
-    let mut out_fields: Vec<Series> = Vec::with_capacity(target_schema.fields_as_series().len() + value_names.len());
+    let mut out_fields: Vec<Series> = Vec::with_capacity(target_fields.len() + value_names.len());
 
-    let passthrough_fields = target_schema.fields_as_series();
-    for s in &passthrough_fields {
+    for s in &target_fields {
         let name = s.name();
         if value_names.iter().any(|v| v == name) {
             polars_bail!(
@@ -256,10 +249,7 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateNdArgs) -> PolarsResult<
                 name
             );
         }
-        let col = interp_target.column(name).map_err(|_| {
-            polars_err!(InvalidOperation: "interp_target missing column {}", name)
-        })?;
-        out_fields.push(col.as_materialized_series().clone());
+        out_fields.push(s.clone());
     }
 
     for (name, vals) in value_names.iter().zip(out_value_cols.into_iter()) {

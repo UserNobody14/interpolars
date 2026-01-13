@@ -45,21 +45,18 @@ def interpolate_nd(
     else:
         value_struct = pl.struct([value_cols_or_exprs])
 
-    # Provide a dummy struct with the schema of `interp_target` so the Rust plugin can
-    # compute a stable output dtype (including passthrough metadata columns).
-    target_schema_exprs: list[pl.Expr] = []
-    for name in interp_target.columns:
-        dtype = interp_target.schema[name]
-        target_schema_exprs.append(pl.lit(None).cast(dtype).alias(name))
-    target_schema_struct = pl.struct(target_schema_exprs)
+    # Pass the full target as a *literal* struct Series.
+    # Important: `pl.lit(Series)` preserves the Series' own length, so this literal can drive
+    # the plugin's output length (changes_length=True).
+    target_struct_series = (
+        interp_target.select(pl.struct(pl.all()).alias("__interp_target__")).to_series()
+    )
+    target_struct_lit = pl.lit(target_struct_series)
 
     return register_plugin_function(
         plugin_path=PLUGIN_PATH,
         function_name="interpolate_nd",
-        args=[coord_struct, value_struct, target_schema_struct],
-        kwargs={
-            "interp_target": interp_target,
-        },
+        args=[coord_struct, value_struct, target_struct_lit],
         is_elementwise=False,
         changes_length=True,
     ).alias("interpolated")

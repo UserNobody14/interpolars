@@ -23,6 +23,10 @@ module-name = "interpolars._core"
 python-packages = ["interpolars"]
 python-source = "src"
 
+# Add environment variables to the build process
+[tool.maturin.env]
+RUST_MIN_STACK = "16777216"
+
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
 
