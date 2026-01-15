@@ -22,3 +22,9 @@ pyo3-polars = { git = "https://github.com/pola-rs/polars.git", tag = "py-1.37.1"
 
 serde_json = "1.0.145"
 serde = "1.0.213"
+
+
+[profile.release]
+opt-level = 1
+lto = false
+codegen-units = 4
