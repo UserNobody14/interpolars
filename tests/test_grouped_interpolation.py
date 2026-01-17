@@ -1,3 +1,5 @@
+from datetime import date
+
 import polars as pl
 from polars.testing import assert_frame_equal
 
@@ -77,6 +79,90 @@ def test_grouped_interpolation_extra_coord_dims():
                     pl.col("time"),
                     pl.col("2m_temp"),
                     pl.col("precipitation"),
+                ]
+            ).alias("interpolated")
+        )
+        .select(["interpolated"])
+    )
+
+    assert_frame_equal(result, expected_df)
+
+def test_grouped_interpolation_extra_coord_dims_date_group_key():
+    """
+    Grouping dims should preserve dtype.
+
+    Here, `time` is a Date and is not present in the target, so it becomes a group dim.
+    The output should include `time` as a Date (not float) and the interpolated values
+    should match per-date groups.
+    """
+    times = [date(2020, 1, 1), date(2020, 1, 2)]
+    lats = [0.0, 1.0]
+    lons = [0.0, 1.0]
+
+    rows: list[dict[str, object]] = []
+    for t_idx, t in enumerate(times):
+        for lat in lats:
+            for lon in lons:
+                rows.append(
+                    {
+                        "time": t,
+                        "latitude": lat,
+                        "longitude": lon,
+                        "value": 100.0 * lat + 1000.0 * lon + 10.0 * t_idx,
+                    }
+                )
+
+    # Ensure `time` is a proper Date dtype (avoid Object).
+    source_df = pl.DataFrame(
+        {
+            "time": pl.Series("time", [r["time"] for r in rows], dtype=pl.Date),
+            "latitude": [r["latitude"] for r in rows],
+            "longitude": [r["longitude"] for r in rows],
+            "value": [r["value"] for r in rows],
+        }
+    )
+
+    target_df = pl.DataFrame(
+        {
+            "latitude": [0.25, 0.75],
+            "longitude": [0.50, 0.25],
+            "label": ["a", "b"],
+        }
+    )
+
+    result = (
+        source_df.lazy()
+        .select(interpolate_nd(["latitude", "longitude", "time"], ["value"], target_df))
+        .collect()
+    )
+
+    expected_values = [
+        # date 2020-01-01 (t_idx=0)
+        525.0,
+        325.0,
+        # date 2020-01-02 (t_idx=1)
+        535.0,
+        335.0,
+    ]
+    expected_df = (
+        pl.DataFrame(
+            {
+                "latitude": [0.25, 0.75, 0.25, 0.75],
+                "longitude": [0.50, 0.25, 0.50, 0.25],
+                "label": ["a", "b", "a", "b"],
+                "time": [times[0], times[0], times[1], times[1]],
+                "value": expected_values,
+            }
+        )
+        .with_columns(pl.col("time").cast(pl.Date))
+        .with_columns(
+            pl.struct(
+                [
+                    pl.col("latitude"),
+                    pl.col("longitude"),
+                    pl.col("label"),
+                    pl.col("time"),
+                    pl.col("value"),
                 ]
             ).alias("interpolated")
         )

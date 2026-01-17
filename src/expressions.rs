@@ -192,6 +192,14 @@ fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
     let mut group_keys: Vec<Vec<u64>> = groups.keys().cloned().collect();
     group_keys.sort();
 
+    // For dtype-preserving output of group dims, capture one representative row index per group.
+    // (All rows in a group share the same group-dim values by construction.)
+    let mut group_first_row: HashMap<Vec<u64>, usize> = HashMap::with_capacity(groups.len());
+    for (k, rows) in &groups {
+        let first = *rows.first().ok_or_else(|| polars_err!(ComputeError: "empty group"))?;
+        group_first_row.insert(k.clone(), first);
+    }
+
     // Extract value fields
     let value_fields = source_values.fields_as_series();
     if value_fields.is_empty() {
@@ -352,7 +360,7 @@ fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
         out_fields.push(out);
     }
 
-    // Add group fields (Float64) repeated for each target row, per group.
+    // Add group fields (preserve dtype) repeated for each target row, per group.
     for (pos, name) in group_dim_names.iter().enumerate() {
         if value_names.iter().any(|v| v == name) {
             polars_bail!(
@@ -361,12 +369,25 @@ fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
                 name
             );
         }
-        let mut vals: Vec<f64> = Vec::with_capacity(out_n);
+        let src_series = &coord_fields[group_dim_indices[pos]];
+        let dtype = src_series.dtype().clone();
+
+        let mut vals: Vec<AnyValue<'static>> = Vec::with_capacity(out_n);
         for gkey in &group_keys {
-            let v = f64::from_bits(gkey[pos]);
-            vals.extend(std::iter::repeat_n(v, target_n));
+            let first_row = *group_first_row
+                .get(gkey)
+                .ok_or_else(|| polars_err!(ComputeError: "missing group representative row"))?;
+            let av = src_series
+                .get(first_row)?
+                .into_static();
+            vals.extend(std::iter::repeat_n(av, target_n));
         }
-        out_fields.push(Series::new(name.as_str().into(), vals));
+        out_fields.push(Series::from_any_values_and_dtype(
+            name.as_str().into(),
+            &vals,
+            &dtype,
+            true,
+        )?);
     }
 
     // Add interpolated value columns.

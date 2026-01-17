@@ -15,6 +15,7 @@ pyo3 = { version = "0.27.2", features = ["extension-module", "abi3-py39"] }
 # Get polars from git
 polars = { git = "https://github.com/pola-rs/polars.git", tag = "py-1.37.1", default-features = false, features = [
     "dtype-struct",
+    "dtype-full",
 ] }
 pyo3-polars = { git = "https://github.com/pola-rs/polars.git", tag = "py-1.37.1", default-features = false, features = [
     "derive",
