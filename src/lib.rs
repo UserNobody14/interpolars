@@ -11,8 +11,8 @@ mod _core {
     use pyo3_polars::PolarsAllocator;
 
     #[pyfunction]
-    fn hello_from_bin() -> String {
-        "Hello from interpolars!".to_string()
+    fn print_extension_info() -> String {
+        "Interpolars extension module loaded successfully".to_string()
     }
 
     #[global_allocator]

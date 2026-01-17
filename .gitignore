@@ -9,5 +9,7 @@ wheels/
 target/
 src/**/*.so
 
+.env
+
 # Virtual environments
 .venv

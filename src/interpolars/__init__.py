@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     from polars._typing import IntoExprColumn
 else:
     IntoExprColumn = Any
-# from interpolars._core import interpolate_nd as interpolate_nd_core
 
 PLUGIN_PATH = Path(__file__).parent
 
