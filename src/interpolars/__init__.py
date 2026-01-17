@@ -26,13 +26,20 @@ def interpolate_nd(
     - **Target coords**: `interp_target` must contain *plain columns* matching the source coord
       field names (e.g. `xfield`, `yfield`, ...). Struct columns are not considered.
 
+      If the **source** has additional coordinate columns that are **missing** from `interp_target`
+      (e.g. `time`), the plugin will treat those as **grouping dimensions**: it will group the
+      source rows by those extra coordinate columns and run interpolation independently per group.
+
     Notes:
     - The adaptor wraps the provided coords/values into structs internally:
       `pl.struct(expr_cols_or_exprs)` and `pl.struct(value_cols_or_exprs)`.
     - The returned expression evaluates to a **single struct** that contains:
       - all columns from `interp_target` (coords + metadata)
+      - any extra coordinate columns from the source that are missing from `interp_target`
       - all interpolated value fields
-    - This plugin **changes length**: the output length equals `interp_target.height()`.
+    - This plugin **changes length**:
+      - if there are no extra source coordinate dims, output length equals `interp_target.height()`
+      - otherwise output length equals `interp_target.height() * number_of_groups`
     """
 
     if isinstance(expr_cols_or_exprs, (list, tuple)):
