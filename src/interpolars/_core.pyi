@@ -1,3 +1,5 @@
+from typing import Literal
+
 import polars as pl
 from polars.expr import IntoExprColumn
 
@@ -10,4 +12,7 @@ def interpolate_nd(
     | list[IntoExprColumn]
     | tuple[IntoExprColumn, ...],
     interp_target: pl.DataFrame,
+    handle_missing: Literal["error", "drop", "fill", "nearest"] = ...,
+    fill_value: float | None = ...,
+    extrapolate: bool = ...,
 ) -> pl.Expr: ...
