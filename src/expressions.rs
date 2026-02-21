@@ -1,6 +1,23 @@
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
+use serde::Deserialize;
 use std::collections::HashMap;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MissingHandling {
+    Error,
+    Drop,
+    Fill,
+    Nearest,
+}
+
+#[derive(Deserialize)]
+struct InterpolateKwargs {
+    handle_missing: MissingHandling,
+    fill_value: Option<f64>,
+    extrapolate: bool,
+}
 
 /// Output type is a concatenation of:
 /// - the passthrough target struct schema (3rd input)
@@ -54,9 +71,8 @@ fn same_output_type(input_fields: &[Field]) -> PolarsResult<Field> {
         .cloned()
         .collect();
 
-    let mut out_fields: Vec<Field> = Vec::with_capacity(
-        target_fields.len() + group_fields.len() + value_fields.len(),
-    );
+    let mut out_fields: Vec<Field> =
+        Vec::with_capacity(target_fields.len() + group_fields.len() + value_fields.len());
     out_fields.extend(target_fields.iter().cloned());
     for f in &group_fields {
         if out_fields.iter().any(|existing| existing.name == f.name) {
@@ -79,7 +95,10 @@ fn same_output_type(input_fields: &[Field]) -> PolarsResult<Field> {
         out_fields.push(f.clone());
     }
 
-    Ok(Field::new("interpolated".into(), DataType::Struct(out_fields)))
+    Ok(Field::new(
+        "interpolated".into(),
+        DataType::Struct(out_fields),
+    ))
 }
 
 fn series_to_f64_vec(s: &Series) -> PolarsResult<Vec<f64>> {
@@ -87,18 +106,209 @@ fn series_to_f64_vec(s: &Series) -> PolarsResult<Vec<f64>> {
     let ca = s.f64()?;
     ca.into_iter()
         .map(|opt| {
-            opt.ok_or_else(|| polars_err!(ComputeError: "null not supported in interpolation inputs"))
+            opt.ok_or_else(
+                || polars_err!(ComputeError: "null not supported in interpolation inputs"),
+            )
         })
         .collect()
 }
 
-fn lower_upper_indices(axis: &[f64], t: f64) -> (usize, usize) {
+fn is_missing(v: Option<f64>) -> bool {
+    match v {
+        None => true,
+        Some(x) => x.is_nan(),
+    }
+}
+
+/// Pre-process source coordinate and value fields to handle NaN/Null according to `handle_missing`.
+///
+/// Coord rows with NaN/Null are always dropped (except in Error mode, which bails).
+/// Value NaN/Null handling depends on the mode: error, drop the row, fill with a constant,
+/// or replace with the nearest valid value by Euclidean distance in coordinate space.
+fn preprocess_sources(
+    coord_fields: Vec<Series>,
+    value_fields: Vec<Series>,
+    handle_missing: &MissingHandling,
+    fill_value: Option<f64>,
+) -> PolarsResult<(Vec<Series>, Vec<Series>)> {
+    let n = coord_fields.first().map_or(0, |s| s.len());
+
+    // Build coord validity mask (true = row has valid coords)
+    let mut coord_valid = vec![true; n];
+    for s in &coord_fields {
+        let s_f64 = s.cast(&DataType::Float64)?;
+        let ca = s_f64.f64()?;
+        for (i, v) in ca.into_iter().enumerate() {
+            if is_missing(v) {
+                coord_valid[i] = false;
+            }
+        }
+    }
+
+    match handle_missing {
+        MissingHandling::Error => {
+            if let Some(i) = coord_valid.iter().position(|&v| !v) {
+                polars_bail!(
+                    ComputeError:
+                    "NaN or Null found in source coordinate at row {}",
+                    i
+                );
+            }
+            for s in &value_fields {
+                let s_f64 = s.cast(&DataType::Float64)?;
+                let ca = s_f64.f64()?;
+                for (i, v) in ca.into_iter().enumerate() {
+                    if is_missing(v) {
+                        polars_bail!(
+                            ComputeError:
+                            "NaN or Null found in source value '{}' at row {}",
+                            s.name(),
+                            i
+                        );
+                    }
+                }
+            }
+            Ok((coord_fields, value_fields))
+        }
+        MissingHandling::Drop => {
+            let mut valid = coord_valid;
+            for s in &value_fields {
+                let s_f64 = s.cast(&DataType::Float64)?;
+                let ca = s_f64.f64()?;
+                for (i, v) in ca.into_iter().enumerate() {
+                    if is_missing(v) {
+                        valid[i] = false;
+                    }
+                }
+            }
+            let mask = BooleanChunked::from_slice("mask".into(), &valid);
+            let coords = coord_fields
+                .iter()
+                .map(|s| s.filter(&mask))
+                .collect::<PolarsResult<Vec<_>>>()?;
+            let values = value_fields
+                .iter()
+                .map(|s| s.filter(&mask))
+                .collect::<PolarsResult<Vec<_>>>()?;
+            Ok((coords, values))
+        }
+        MissingHandling::Fill => {
+            let fv = fill_value.ok_or_else(|| {
+                polars_err!(
+                    ComputeError:
+                    "fill_value is required when handle_missing='fill'"
+                )
+            })?;
+            let mask = BooleanChunked::from_slice("mask".into(), &coord_valid);
+            let coords = coord_fields
+                .iter()
+                .map(|s| s.filter(&mask))
+                .collect::<PolarsResult<Vec<_>>>()?;
+            let values = value_fields
+                .iter()
+                .map(|s| {
+                    let filtered = s.filter(&mask)?;
+                    let f64_s = filtered.cast(&DataType::Float64)?;
+                    let ca = f64_s.f64()?;
+                    let mut filled: Float64Chunked = ca
+                        .into_iter()
+                        .map(|opt| if is_missing(opt) { Some(fv) } else { opt })
+                        .collect();
+                    filled.rename(s.name().clone());
+                    Ok(filled.into_series())
+                })
+                .collect::<PolarsResult<Vec<_>>>()?;
+            Ok((coords, values))
+        }
+        MissingHandling::Nearest => {
+            let mask = BooleanChunked::from_slice("mask".into(), &coord_valid);
+            let coords = coord_fields
+                .iter()
+                .map(|s| s.filter(&mask))
+                .collect::<PolarsResult<Vec<_>>>()?;
+            let filtered_values = value_fields
+                .iter()
+                .map(|s| s.filter(&mask))
+                .collect::<PolarsResult<Vec<_>>>()?;
+
+            // Build coordinate vectors from the filtered coords for distance calculations
+            let coord_vecs: Vec<Vec<f64>> = coords
+                .iter()
+                .map(series_to_f64_vec)
+                .collect::<PolarsResult<_>>()?;
+            let filtered_n = coords.first().map_or(0, |s| s.len());
+
+            let values = filtered_values
+                .iter()
+                .map(|s| {
+                    let f64_s = s.cast(&DataType::Float64)?;
+                    let ca = f64_s.f64()?;
+                    let vals: Vec<Option<f64>> = ca.into_iter().collect();
+
+                    // Find indices that are valid for this column
+                    let valid_indices: Vec<usize> = vals
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, v)| !is_missing(**v))
+                        .map(|(i, _)| i)
+                        .collect();
+
+                    if valid_indices.is_empty() {
+                        polars_bail!(
+                            ComputeError:
+                            "no valid values in column '{}' for nearest-neighbor fill",
+                            s.name()
+                        );
+                    }
+
+                    let filled: Vec<Option<f64>> = (0..filtered_n)
+                        .map(|i| {
+                            if !is_missing(vals[i]) {
+                                return vals[i];
+                            }
+                            // Find nearest valid row by Euclidean distance in coord space
+                            let mut best_dist = f64::INFINITY;
+                            let mut best_val = None;
+                            for &j in &valid_indices {
+                                let dist: f64 = coord_vecs
+                                    .iter()
+                                    .map(|cv| {
+                                        let d = cv[i] - cv[j];
+                                        d * d
+                                    })
+                                    .sum();
+                                if dist < best_dist {
+                                    best_dist = dist;
+                                    best_val = vals[j];
+                                }
+                            }
+                            best_val
+                        })
+                        .collect();
+
+                    let mut result: Float64Chunked = filled.into_iter().collect();
+                    result.rename(s.name().clone());
+                    Ok(result.into_series())
+                })
+                .collect::<PolarsResult<Vec<_>>>()?;
+            Ok((coords, values))
+        }
+    }
+}
+
+fn lower_upper_indices(axis: &[f64], t: f64, extrapolate: bool) -> (usize, usize) {
     debug_assert!(!axis.is_empty());
     if t <= axis[0] {
+        if extrapolate && axis.len() > 1 {
+            return (0, 1);
+        }
         return (0, 0);
     }
     let last = axis.len() - 1;
     if t >= axis[last] {
+        if extrapolate && last > 0 {
+            return (last - 1, last);
+        }
         return (last, last);
     }
 
@@ -122,7 +332,7 @@ fn lower_upper_indices(axis: &[f64], t: f64) -> (usize, usize) {
 }
 
 #[polars_expr(output_type_func=same_output_type)]
-fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
+fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<Series> {
     // inputs[0]: source coordinates as a Struct (e.g. {xfield, yfield, ...})
     // inputs[1]: source values as a Struct (e.g. {valuefield, ...})
     // inputs[2]: target rows as a Struct Series where each field is a column from interp_target
@@ -132,10 +342,22 @@ fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
     let source_values = inputs[1].struct_()?;
     let interp_target = inputs[2].struct_()?;
 
-    let coord_fields = source_coords.fields_as_series();
-    if coord_fields.is_empty() {
+    let coord_fields_raw = source_coords.fields_as_series();
+    if coord_fields_raw.is_empty() {
         polars_bail!(InvalidOperation: "expected at least 1 coordinate field for interpolation");
     }
+    let value_fields_raw = source_values.fields_as_series();
+    if value_fields_raw.is_empty() {
+        polars_bail!(InvalidOperation: "expected at least 1 value field for interpolation");
+    }
+
+    // Pre-process source data: handle NaN/Null in coords and values.
+    let (coord_fields, value_fields) = preprocess_sources(
+        coord_fields_raw,
+        value_fields_raw,
+        &kwargs.handle_missing,
+        kwargs.fill_value,
+    )?;
 
     // Split source coord fields into:
     // - interp dims: coord fields present in target (we interpolate across these)
@@ -166,15 +388,14 @@ fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
         );
     }
 
-    // Materialize all coord columns as f64 so we can do grouping + interpolation math.
-    // Note: nulls are not supported (see `series_to_f64_vec`).
+    // Materialize all coord columns as f64 (clean after preprocessing).
     let coord_cols_all: Vec<Vec<f64>> = coord_fields
         .iter()
         .map(series_to_f64_vec)
         .collect::<PolarsResult<_>>()?;
 
     // Group source rows by the "group dims" (extra coord fields missing from target).
-    let source_n = source_coords.len();
+    let source_n = coord_fields.first().map_or(0, |s| s.len());
     let mut groups: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
     if group_dim_indices.is_empty() {
         groups.insert(Vec::new(), (0..source_n).collect());
@@ -196,15 +417,12 @@ fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
     // (All rows in a group share the same group-dim values by construction.)
     let mut group_first_row: HashMap<Vec<u64>, usize> = HashMap::with_capacity(groups.len());
     for (k, rows) in &groups {
-        let first = *rows.first().ok_or_else(|| polars_err!(ComputeError: "empty group"))?;
+        let first = *rows
+            .first()
+            .ok_or_else(|| polars_err!(ComputeError: "empty group"))?;
         group_first_row.insert(k.clone(), first);
     }
 
-    // Extract value fields
-    let value_fields = source_values.fields_as_series();
-    if value_fields.is_empty() {
-        polars_bail!(InvalidOperation: "expected at least 1 value field for interpolation");
-    }
     let value_names: Vec<String> = value_fields.iter().map(|s| s.name().to_string()).collect();
     let value_cols: Vec<Vec<f64>> = value_fields
         .iter()
@@ -215,9 +433,10 @@ fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
     let target_n = interp_target.len();
     let mut target_coord_cols: Vec<Vec<f64>> = Vec::with_capacity(interp_dim_indices.len());
     for name in &interp_dim_names {
-        let s = target_fields.iter().find(|s| s.name() == name).ok_or_else(|| {
-            polars_err!(InvalidOperation: "interp_target missing field {}", name)
-        })?;
+        let s = target_fields
+            .iter()
+            .find(|s| s.name() == name)
+            .ok_or_else(|| polars_err!(InvalidOperation: "interp_target missing field {}", name))?;
         target_coord_cols.push(series_to_f64_vec(s)?);
     }
 
@@ -262,7 +481,7 @@ fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
             for d in 0..interp_dims {
                 let t = target_coord_cols[d][row];
                 tvals.push(t);
-                let (lo, hi) = lower_upper_indices(&axes[d], t);
+                let (lo, hi) = lower_upper_indices(&axes[d], t, kwargs.extrapolate);
                 lo_idx.push(lo);
                 hi_idx.push(hi);
             }
@@ -377,9 +596,7 @@ fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
             let first_row = *group_first_row
                 .get(gkey)
                 .ok_or_else(|| polars_err!(ComputeError: "missing group representative row"))?;
-            let av = src_series
-                .get(first_row)?
-                .into_static();
+            let av = src_series.get(first_row)?.into_static();
             vals.extend(std::iter::repeat_n(av, target_n));
         }
         out_fields.push(Series::from_any_values_and_dtype(
@@ -394,9 +611,5 @@ fn interpolate_nd(inputs: &[Series]) -> PolarsResult<Series> {
     for (name, vals) in value_names.iter().zip(out_value_cols.into_iter()) {
         out_fields.push(Series::new(name.as_str().into(), vals));
     }
-    Ok(
-        StructChunked::from_series("interpolated".into(), out_n, out_fields.iter())?
-            .into_series(),
-    )
+    Ok(StructChunked::from_series("interpolated".into(), out_n, out_fields.iter())?.into_series())
 }
-

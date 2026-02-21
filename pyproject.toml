@@ -1,6 +1,6 @@
 [project]
 name = "interpolars"
-version = "0.1.1"
+version = "1.0.0"
 description = "Interpolation plugin for Polars"
 readme = "README.md"
 authors = [
