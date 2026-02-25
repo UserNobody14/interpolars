@@ -96,7 +96,7 @@ wheels = [
 
 [[package]]
 name = "interpolars"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "polars" },
@@ -110,7 +110,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "polars", specifier = "==1.37.1" }]
+requires-dist = [{ name = "polars", specifier = ">=1.37.1" }]
 
 [package.metadata.requires-dev]
 dev = [
