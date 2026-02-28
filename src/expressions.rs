@@ -71,9 +71,22 @@ fn same_output_type(input_fields: &[Field]) -> PolarsResult<Field> {
         .cloned()
         .collect();
 
+    let source_coord_dtype_map: HashMap<&PlSmallStr, &DataType> = source_coord_fields
+        .iter()
+        .map(|f| (&f.name, f.dtype()))
+        .collect();
+
     let mut out_fields: Vec<Field> =
         Vec::with_capacity(target_fields.len() + group_fields.len() + value_fields.len());
-    out_fields.extend(target_fields.iter().cloned());
+    for f in target_fields {
+        if let Some(&src_dt) = source_coord_dtype_map.get(&f.name) {
+            if let Some(reconciled) = reconcile_temporal_dtype(src_dt, f.dtype()) {
+                out_fields.push(Field::new(f.name.clone(), reconciled));
+                continue;
+            }
+        }
+        out_fields.push(f.clone());
+    }
     for f in &group_fields {
         if out_fields.iter().any(|existing| existing.name == f.name) {
             polars_bail!(
@@ -117,6 +130,38 @@ fn is_missing(v: Option<f64>) -> bool {
     match v {
         None => true,
         Some(x) => x.is_nan(),
+    }
+}
+
+fn finest_time_unit(tu1: TimeUnit, tu2: TimeUnit) -> TimeUnit {
+    match (tu1, tu2) {
+        (TimeUnit::Nanoseconds, _) | (_, TimeUnit::Nanoseconds) => TimeUnit::Nanoseconds,
+        (TimeUnit::Microseconds, _) | (_, TimeUnit::Microseconds) => TimeUnit::Microseconds,
+        _ => TimeUnit::Milliseconds,
+    }
+}
+
+/// When two dtypes are both temporal but differ in precision (e.g. Datetime("us") vs
+/// Datetime("ns")), return the highest-precision common type. Returns None when no
+/// reconciliation is needed (same type, or non-temporal).
+fn reconcile_temporal_dtype(dt1: &DataType, dt2: &DataType) -> Option<DataType> {
+    if dt1 == dt2 {
+        return None;
+    }
+    match (dt1, dt2) {
+        (DataType::Datetime(tu1, tz1), DataType::Datetime(tu2, tz2)) => {
+            let tu = finest_time_unit(*tu1, *tu2);
+            let tz = tz1.as_ref().or(tz2.as_ref()).cloned();
+            Some(DataType::Datetime(tu, tz))
+        }
+        (DataType::Duration(tu1), DataType::Duration(tu2)) => {
+            Some(DataType::Duration(finest_time_unit(*tu1, *tu2)))
+        }
+        (DataType::Date, DataType::Datetime(tu, tz))
+        | (DataType::Datetime(tu, tz), DataType::Date) => {
+            Some(DataType::Datetime(*tu, tz.clone()))
+        }
+        _ => None,
     }
 }
 
@@ -352,7 +397,7 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
     }
 
     // Pre-process source data: handle NaN/Null in coords and values.
-    let (coord_fields, value_fields) = preprocess_sources(
+    let (mut coord_fields, value_fields) = preprocess_sources(
         coord_fields_raw,
         value_fields_raw,
         &kwargs.handle_missing,
@@ -362,7 +407,7 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
     // Split source coord fields into:
     // - interp dims: coord fields present in target (we interpolate across these)
     // - group dims: coord fields missing from target (we group by these)
-    let target_fields = interp_target.fields_as_series();
+    let mut target_fields = interp_target.fields_as_series();
     let target_name_set: std::collections::HashSet<PlSmallStr> =
         target_fields.iter().map(|s| s.name().clone()).collect();
 
@@ -386,6 +431,39 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
             InvalidOperation:
             "no interpolation dimensions found: none of the source coord fields are present in interp_target"
         );
+    }
+
+    // Reconcile temporal precision between source and target coordinate dimensions.
+    {
+        let mut reconcile_map: HashMap<String, DataType> = HashMap::new();
+        for (pos, &d) in interp_dim_indices.iter().enumerate() {
+            let target_s = target_fields
+                .iter()
+                .find(|s| s.name() == interp_dim_names[pos].as_str())
+                .ok_or_else(|| {
+                    polars_err!(
+                        InvalidOperation: "interp_target missing field {}",
+                        interp_dim_names[pos]
+                    )
+                })?;
+            if let Some(reconciled) =
+                reconcile_temporal_dtype(coord_fields[d].dtype(), target_s.dtype())
+            {
+                reconcile_map.insert(interp_dim_names[pos].clone(), reconciled);
+            }
+        }
+        if !reconcile_map.is_empty() {
+            for (pos, &d) in interp_dim_indices.iter().enumerate() {
+                if let Some(dt) = reconcile_map.get(&interp_dim_names[pos]) {
+                    coord_fields[d] = coord_fields[d].cast(dt)?;
+                }
+            }
+            for s in &mut target_fields {
+                if let Some(dt) = reconcile_map.get(s.name().as_str()) {
+                    *s = s.cast(dt)?;
+                }
+            }
+        }
     }
 
     // Materialize all coord columns as f64 (clean after preprocessing).
