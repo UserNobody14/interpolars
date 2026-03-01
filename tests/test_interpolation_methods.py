@@ -7,6 +7,7 @@ from polars.testing import assert_frame_equal
 from scipy.interpolate import (
     Akima1DInterpolator,
     PchipInterpolator,
+    RegularGridInterpolator,
     interp1d,
 )
 
@@ -268,3 +269,213 @@ def test_method_kwarg_passthrough(method):
     vals = result.unnest("interpolated")["v"].to_list()
     assert len(vals) == 4
     assert all(isinstance(v, float) for v in vals)
+
+
+# ---------------------------------------------------------------------------
+# Successive 1D vs tensor product (RegularGridInterpolator) comparison
+# ---------------------------------------------------------------------------
+#
+# interpolars decomposes N-D interpolation into successive 1D passes.
+#
+# For methods where 1D interpolation is a LINEAR operator on the data values
+# (linear, cubic splines), this is mathematically equivalent to the tensor
+# product formulation.  The proof: each 1D pass computes result = w^T @ data
+# where weights w depend only on the knot positions and target coordinate
+# (not the data values).  Matrix-multiplication associativity guarantees that
+# the order of axis reduction doesn't matter.
+#
+# For methods whose slope computation is NONLINEAR in the data values (PCHIP,
+# Akima, Makima -- which use harmonic means, absolute differences, and
+# sign-dependent clamping), the successive 1D decomposition is NOT equivalent
+# to any unique tensor product: the result depends on the order in which axes
+# are reduced.
+
+def _build_nonseparable_surface():
+    """f(x,y) = sin(x)*cos(y) + 0.5*x*y on a non-uniform rectilinear grid."""
+    sx = np.array([0.0, 0.3, 1.0, 1.5, 2.2, 3.0, 3.5])
+    sy = np.array([0.0, 0.4, 1.0, 1.8, 2.5, 3.0])
+    xx, yy = np.meshgrid(sx, sy, indexing="ij")
+    values = np.sin(xx) * np.cos(yy) + 0.5 * xx * yy
+    return sx, sy, values
+
+
+def _build_peaked_surface():
+    """Surface with a sharp central peak that stresses nonlinear slope methods.
+
+    f(x,y) = 1 / (1 + 5*((x-1.5)^2 + (y-1.5)^2)) + 0.3*x*sin(2y)
+    """
+    sx = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
+    sy = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
+    xx, yy = np.meshgrid(sx, sy, indexing="ij")
+    values = 1.0 / (1.0 + 5 * ((xx - 1.5) ** 2 + (yy - 1.5) ** 2)) + 0.3 * xx * np.sin(2 * yy)
+    return sx, sy, values
+
+
+_TP_TX = np.array([0.15, 0.65, 1.25, 1.85, 2.6, 3.25])
+_TP_TY = np.array([0.2, 0.7, 1.4, 2.15, 2.75, 0.5])
+
+_PEAK_TX = np.array([0.3, 0.7, 1.2, 1.8, 2.3, 2.7])
+_PEAK_TY = np.array([0.2, 0.8, 1.3, 1.7, 2.2, 2.8])
+
+
+def _interpolars_2d_grid(sx, sy, values_grid, tx, ty, method, axes_order=("x", "y")):
+    """Run interpolars on a 2D grid defined by numpy arrays.
+
+    axes_order controls the axis reduction order passed to interpolate_nd.
+    ("x","y") reduces y (last) first then x; ("y","x") reduces x first then y.
+    """
+    rows_x, rows_y, rows_v = [], [], []
+    for i, x in enumerate(sx):
+        for j, y in enumerate(sy):
+            rows_x.append(float(x))
+            rows_y.append(float(y))
+            rows_v.append(float(values_grid[i, j]))
+    source = pl.DataFrame({"x": rows_x, "y": rows_y, "v": rows_v})
+    target = pl.DataFrame({"x": tx.tolist(), "y": ty.tolist()})
+    result = (
+        source.lazy()
+        .select(interpolate_nd(list(axes_order), ["v"], target, method=method))
+        .collect()
+    )
+    return np.array(result.unnest("interpolated")["v"].to_list())
+
+
+def _rgi_eval(sx, sy, values_grid, tx, ty, method, **kwargs):
+    """Evaluate via scipy RegularGridInterpolator (tensor product)."""
+    rgi = RegularGridInterpolator(
+        (sx, sy), values_grid, method=method, bounds_error=False, **kwargs,
+    )
+    return rgi(np.column_stack([tx, ty]))
+
+
+class TestSuccessive1DVsTensorProduct:
+    """Compare interpolars' successive-1D approach against scipy's tensor
+    product (RegularGridInterpolator) on non-separable 2D surfaces.
+
+    Key findings documented by these tests:
+
+    1. Linear & cubic: successive 1D IS equivalent to tensor product
+       (both are linear operators on the data values).
+    2. The default RGI "cubic" appears to differ by ~1e-5, but this is
+       entirely due to its iterative sparse solver (gcrotmk, atol=1e-6);
+       a direct solver yields machine-epsilon agreement.
+    3. RGI's "pchip" method uses successive 1D internally, so it matches.
+    4. For PCHIP / Akima / Makima, the successive 1D result is
+       axis-order-dependent because the slope computation is nonlinear.
+    """
+
+    # ------------------------------------------------------------------
+    # Linear & cubic: successive 1D == tensor product
+    # ------------------------------------------------------------------
+
+    def test_linear_matches_rgi(self):
+        """Successive 1D linear == tensor product linear (bilinear)."""
+        sx, sy, vals = _build_nonseparable_surface()
+        actual = _interpolars_2d_grid(sx, sy, vals, _TP_TX, _TP_TY, "linear")
+        expected = _rgi_eval(sx, sy, vals, _TP_TX, _TP_TY, "linear")
+        np.testing.assert_allclose(actual, expected, atol=1e-10)
+
+    def test_cubic_matches_rgi_direct_solver(self):
+        """Successive 1D cubic == tensor product cubic (direct solver).
+
+        With a direct sparse solver the Kronecker-product system is solved
+        exactly, confirming that successive 1D and tensor product cubic are
+        mathematically identical (both not-a-knot, both linear in the data).
+        """
+        from scipy.sparse.linalg import spsolve
+
+        sx, sy, vals = _build_nonseparable_surface()
+        actual = _interpolars_2d_grid(sx, sy, vals, _TP_TX, _TP_TY, "cubic")
+        expected = _rgi_eval(sx, sy, vals, _TP_TX, _TP_TY, "cubic", solver=spsolve)
+        np.testing.assert_allclose(actual, expected, atol=1e-10)
+
+    def test_cubic_rgi_default_solver_noise(self):
+        """Default RGI cubic uses gcrotmk with atol=1e-6, creating ~1e-5
+        discrepancy that is solver noise, not a mathematical difference."""
+        from scipy.sparse.linalg import spsolve
+
+        sx, sy, vals = _build_nonseparable_surface()
+        r_iterative = _rgi_eval(sx, sy, vals, _TP_TX, _TP_TY, "cubic")
+        r_direct = _rgi_eval(sx, sy, vals, _TP_TX, _TP_TY, "cubic", solver=spsolve)
+        r_successive = _interpolars_2d_grid(sx, sy, vals, _TP_TX, _TP_TY, "cubic")
+
+        iterative_vs_successive = np.max(np.abs(r_iterative - r_successive))
+        direct_vs_successive = np.max(np.abs(r_direct - r_successive))
+
+        assert iterative_vs_successive > 1e-6, (
+            "Expected iterative solver to introduce >1e-6 noise"
+        )
+        assert direct_vs_successive < 1e-12, (
+            f"Direct solver should match successive 1D to machine eps, "
+            f"got {direct_vs_successive:.2e}"
+        )
+
+    # ------------------------------------------------------------------
+    # PCHIP: RGI also uses successive 1D, so they agree
+    # ------------------------------------------------------------------
+
+    def test_pchip_matches_rgi(self):
+        """PCHIP matches RGI because scipy's RegularGridInterpolator also
+        uses successive 1D evaluation for method='pchip' (via
+        _evaluate_spline / _do_pchip), not a tensor product NdBSpline."""
+        sx, sy, vals = _build_nonseparable_surface()
+        actual = _interpolars_2d_grid(sx, sy, vals, _TP_TX, _TP_TY, "pchip")
+        expected = _rgi_eval(sx, sy, vals, _TP_TX, _TP_TY, "pchip")
+        np.testing.assert_allclose(actual, expected, atol=1e-10)
+
+    # ------------------------------------------------------------------
+    # Axis-order dependence: linear operator methods are invariant,
+    # nonlinear slope methods are not
+    # ------------------------------------------------------------------
+
+    def test_linear_axis_order_invariant(self):
+        """Linear interpolation result is independent of axis reduction order."""
+        sx, sy, vals = _build_peaked_surface()
+        r_xy = _interpolars_2d_grid(sx, sy, vals, _PEAK_TX, _PEAK_TY, "linear", ("x", "y"))
+        r_yx = _interpolars_2d_grid(sx, sy, vals, _PEAK_TX, _PEAK_TY, "linear", ("y", "x"))
+        np.testing.assert_allclose(r_xy, r_yx, atol=1e-10)
+
+    def test_cubic_axis_order_invariant(self):
+        """Cubic spline result is independent of axis reduction order."""
+        sx, sy, vals = _build_peaked_surface()
+        r_xy = _interpolars_2d_grid(sx, sy, vals, _PEAK_TX, _PEAK_TY, "cubic", ("x", "y"))
+        r_yx = _interpolars_2d_grid(sx, sy, vals, _PEAK_TX, _PEAK_TY, "cubic", ("y", "x"))
+        np.testing.assert_allclose(r_xy, r_yx, atol=1e-10)
+
+    def test_pchip_axis_order_dependent(self):
+        """Successive 1D PCHIP gives different results depending on which
+        axis is reduced first, because slope computation (weighted harmonic
+        mean with monotonicity constraints) is nonlinear in the data."""
+        sx, sy, vals = _build_peaked_surface()
+        r_xy = _interpolars_2d_grid(sx, sy, vals, _PEAK_TX, _PEAK_TY, "pchip", ("x", "y"))
+        r_yx = _interpolars_2d_grid(sx, sy, vals, _PEAK_TX, _PEAK_TY, "pchip", ("y", "x"))
+        max_diff = np.max(np.abs(r_xy - r_yx))
+        assert max_diff > 1e-3, (
+            f"Expected axis-order dependence for PCHIP on peaked surface, "
+            f"but max diff was only {max_diff:.2e}"
+        )
+
+    def test_akima_axis_order_dependent(self):
+        """Successive 1D Akima gives different results depending on axis
+        reduction order, because slope weights use |m_{i+1} - m_i| which
+        is nonlinear in the data."""
+        sx, sy, vals = _build_peaked_surface()
+        r_xy = _interpolars_2d_grid(sx, sy, vals, _PEAK_TX, _PEAK_TY, "akima", ("x", "y"))
+        r_yx = _interpolars_2d_grid(sx, sy, vals, _PEAK_TX, _PEAK_TY, "akima", ("y", "x"))
+        max_diff = np.max(np.abs(r_xy - r_yx))
+        assert max_diff > 1e-3, (
+            f"Expected axis-order dependence for Akima on peaked surface, "
+            f"but max diff was only {max_diff:.2e}"
+        )
+
+    def test_makima_axis_order_dependent(self):
+        """Successive 1D Makima gives different results depending on axis
+        reduction order (same nonlinearity as Akima)."""
+        sx, sy, vals = _build_peaked_surface()
+        r_xy = _interpolars_2d_grid(sx, sy, vals, _PEAK_TX, _PEAK_TY, "makima", ("x", "y"))
+        r_yx = _interpolars_2d_grid(sx, sy, vals, _PEAK_TX, _PEAK_TY, "makima", ("y", "x"))
+        max_diff = np.max(np.abs(r_xy - r_yx))
+        assert max_diff > 1e-3, (
+            f"Expected axis-order dependence for Makima on peaked surface, "
+            f"but max diff was only {max_diff:.2e}"
+        )
