@@ -51,7 +51,7 @@ impl InterpolationMethod {
 // ---------------------------------------------------------------------------
 
 /// Return `i` such that `xs[i] <= x < xs[i+1]`, clamped to `[0, n-2]`.
-fn find_interval(xs: &[f64], x: f64) -> usize {
+pub(crate) fn find_interval(xs: &[f64], x: f64) -> usize {
     debug_assert!(xs.len() >= 2);
     let n = xs.len();
     if x <= xs[0] {
@@ -484,6 +484,7 @@ pub fn interpolate_grid(
     current[0]
 }
 
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -499,6 +500,8 @@ mod tests {
             (a - b).abs()
         );
     }
+
+    // --- 1D interpolation tests ---
 
     #[test]
     fn linear_basic() {
@@ -524,7 +527,6 @@ mod tests {
 
     #[test]
     fn cubic_linear_data() {
-        // Cubic spline through co-linear points should reproduce a line
         let xs = [0.0, 1.0, 2.0, 3.0];
         let ys = [0.0, 1.0, 2.0, 3.0];
         for &t in &[0.5, 1.0, 1.5, 2.5] {
@@ -534,7 +536,6 @@ mod tests {
 
     #[test]
     fn pchip_monotone() {
-        // PCHIP should not overshoot on monotone data
         let xs = [0.0, 1.0, 2.0, 3.0, 4.0];
         let ys = [0.0, 1.0, 2.0, 3.0, 4.0];
         for &t in &[0.5, 1.5, 2.5, 3.5] {
@@ -553,7 +554,6 @@ mod tests {
 
     #[test]
     fn nd_linear_2d() {
-        // 2D grid: f(x,y) = x + 2y
         let ax = [0.0, 1.0, 2.0];
         let ay = [0.0, 1.0];
         let mut vals = Vec::new();
@@ -566,4 +566,5 @@ mod tests {
         let r = interpolate_grid(&axes, &vals, &[0.5, 0.5], &LINEAR, false);
         approx_eq(r, 0.5 + 1.0, 1e-12);
     }
+
 }

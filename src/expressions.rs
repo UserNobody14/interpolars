@@ -3,6 +3,7 @@ use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::geospatial::{self, GeospatialMethod, LonRange, RbfKernel};
 use crate::interpolation::{self, InterpolationMethod};
 
 #[derive(Deserialize)]
@@ -67,9 +68,6 @@ fn same_output_type(input_fields: &[Field]) -> PolarsResult<Field> {
         );
     };
 
-    // Coordinates to interpolate over are the intersection between source coord fields
-    // and the target schema fields. Any remaining source coord fields are treated as
-    // "group dims" (e.g. time) and are appended to the output.
     let target_names: std::collections::HashSet<PlSmallStr> =
         target_fields.iter().map(|f| f.name.clone()).collect();
 
@@ -149,9 +147,6 @@ fn finest_time_unit(tu1: TimeUnit, tu2: TimeUnit) -> TimeUnit {
     }
 }
 
-/// When two dtypes are both temporal but differ in precision (e.g. Datetime("us") vs
-/// Datetime("ns")), return the highest-precision common type. Returns None when no
-/// reconciliation is needed (same type, or non-temporal).
 fn reconcile_temporal_dtype(dt1: &DataType, dt2: &DataType) -> Option<DataType> {
     if dt1 == dt2 {
         return None;
@@ -174,10 +169,6 @@ fn reconcile_temporal_dtype(dt1: &DataType, dt2: &DataType) -> Option<DataType> 
 }
 
 /// Pre-process source coordinate and value fields to handle NaN/Null according to `handle_missing`.
-///
-/// Coord rows with NaN/Null are always dropped (except in Error mode, which bails).
-/// Value NaN/Null handling depends on the mode: error, drop the row, fill with a constant,
-/// or replace with the nearest valid value by Euclidean distance in coordinate space.
 fn preprocess_sources(
     coord_fields: Vec<Series>,
     value_fields: Vec<Series>,
@@ -186,7 +177,6 @@ fn preprocess_sources(
 ) -> PolarsResult<(Vec<Series>, Vec<Series>)> {
     let n = coord_fields.first().map_or(0, |s| s.len());
 
-    // Build coord validity mask (true = row has valid coords)
     let mut coord_valid = vec![true; n];
     for s in &coord_fields {
         let s_f64 = s.cast(&DataType::Float64)?;
@@ -284,7 +274,6 @@ fn preprocess_sources(
                 .map(|s| s.filter(&mask))
                 .collect::<PolarsResult<Vec<_>>>()?;
 
-            // Build coordinate vectors from the filtered coords for distance calculations
             let coord_vecs: Vec<Vec<f64>> = coords
                 .iter()
                 .map(series_to_f64_vec)
@@ -298,7 +287,6 @@ fn preprocess_sources(
                     let ca = f64_s.f64()?;
                     let vals: Vec<Option<f64>> = ca.into_iter().collect();
 
-                    // Find indices that are valid for this column
                     let valid_indices: Vec<usize> = vals
                         .iter()
                         .enumerate()
@@ -319,7 +307,6 @@ fn preprocess_sources(
                             if !is_missing(vals[i]) {
                                 return vals[i];
                             }
-                            // Find nearest valid row by Euclidean distance in coord space
                             let mut best_dist = f64::INFINITY;
                             let mut best_val = None;
                             for &j in &valid_indices {
@@ -349,13 +336,121 @@ fn preprocess_sources(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared helpers for both interpolation expression functions
+// ---------------------------------------------------------------------------
+
+struct GroupedRows {
+    groups: HashMap<Vec<u64>, Vec<usize>>,
+    keys: Vec<Vec<u64>>,
+    first_row: HashMap<Vec<u64>, usize>,
+}
+
+/// Group source rows by the specified dimension indices.
+fn build_groups(
+    coord_cols: &[Vec<f64>],
+    group_dim_indices: &[usize],
+    source_n: usize,
+) -> PolarsResult<GroupedRows> {
+    let mut groups: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
+    if group_dim_indices.is_empty() {
+        groups.insert(Vec::new(), (0..source_n).collect());
+    } else {
+        for row_idx in 0..source_n {
+            let key: Vec<u64> = group_dim_indices
+                .iter()
+                .map(|&d| coord_cols[d][row_idx].to_bits())
+                .collect();
+            groups.entry(key).or_default().push(row_idx);
+        }
+    }
+
+    let mut keys: Vec<Vec<u64>> = groups.keys().cloned().collect();
+    keys.sort();
+
+    let mut first_row: HashMap<Vec<u64>, usize> = HashMap::with_capacity(groups.len());
+    for (k, rows) in &groups {
+        let first = *rows
+            .first()
+            .ok_or_else(|| polars_err!(ComputeError: "empty group"))?;
+        first_row.insert(k.clone(), first);
+    }
+
+    Ok(GroupedRows { groups, keys, first_row })
+}
+
+/// Build output struct series from computed value columns.
+fn build_output_struct(
+    target_fields: &[Series],
+    coord_fields: &[Series],
+    group_dim_names: &[String],
+    group_dim_indices: &[usize],
+    value_names: &[String],
+    out_value_cols: Vec<Vec<f64>>,
+    grouped: &GroupedRows,
+    target_n: usize,
+) -> PolarsResult<Series> {
+    let group_count = grouped.keys.len();
+    let out_n = target_n * group_count;
+    let mut out_fields: Vec<Series> =
+        Vec::with_capacity(target_fields.len() + group_dim_names.len() + value_names.len());
+
+    for s in target_fields {
+        let name = s.name();
+        if group_dim_names.iter().any(|g| g == name) || value_names.iter().any(|v| v == name) {
+            polars_bail!(
+                InvalidOperation:
+                "duplicate output field name {} (present in interp_target and group/value fields)",
+                name
+            );
+        }
+        let mut out = s.clone();
+        for _ in 1..group_count {
+            out.append(s)?;
+        }
+        out_fields.push(out);
+    }
+
+    for (pos, name) in group_dim_names.iter().enumerate() {
+        if value_names.iter().any(|v| v == name) {
+            polars_bail!(
+                InvalidOperation:
+                "duplicate output field name {} (present in coords group field and values)",
+                name
+            );
+        }
+        let src_series = &coord_fields[group_dim_indices[pos]];
+        let dtype = src_series.dtype().clone();
+
+        let mut vals: Vec<AnyValue<'static>> = Vec::with_capacity(out_n);
+        for gkey in &grouped.keys {
+            let first_row = *grouped
+                .first_row
+                .get(gkey)
+                .ok_or_else(|| polars_err!(ComputeError: "missing group representative row"))?;
+            let av = src_series.get(first_row)?.into_static();
+            vals.extend(std::iter::repeat_n(av, target_n));
+        }
+        out_fields.push(Series::from_any_values_and_dtype(
+            name.as_str().into(),
+            &vals,
+            &dtype,
+            true,
+        )?);
+    }
+
+    for (name, vals) in value_names.iter().zip(out_value_cols.into_iter()) {
+        out_fields.push(Series::new(name.as_str().into(), vals));
+    }
+    Ok(StructChunked::from_series("interpolated".into(), out_n, out_fields.iter())?.into_series())
+}
+
+// ---------------------------------------------------------------------------
+// interpolate_nd
+// ---------------------------------------------------------------------------
+
 #[polars_expr(output_type_func=same_output_type)]
 fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<Series> {
-    // inputs[0]: source coordinates as a Struct (e.g. {xfield, yfield, ...})
-    // inputs[1]: source values as a Struct (e.g. {valuefield, ...})
-    // inputs[2]: target rows as a Struct Series where each field is a column from interp_target
-    //          (coordinates + any passthrough metadata columns).
-
     let source_coords = inputs[0].struct_()?;
     let source_values = inputs[1].struct_()?;
     let interp_target = inputs[2].struct_()?;
@@ -369,7 +464,6 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
         polars_bail!(InvalidOperation: "expected at least 1 value field for interpolation");
     }
 
-    // Pre-process source data: handle NaN/Null in coords and values.
     let (mut coord_fields, value_fields) = preprocess_sources(
         coord_fields_raw,
         value_fields_raw,
@@ -377,9 +471,6 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
         kwargs.fill_value,
     )?;
 
-    // Split source coord fields into:
-    // - interp dims: coord fields present in target (we interpolate across these)
-    // - group dims: coord fields missing from target (we group by these)
     let mut target_fields = interp_target.fields_as_series();
     let target_name_set: std::collections::HashSet<PlSmallStr> =
         target_fields.iter().map(|s| s.name().clone()).collect();
@@ -439,40 +530,13 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
         }
     }
 
-    // Materialize all coord columns as f64 (clean after preprocessing).
     let coord_cols_all: Vec<Vec<f64>> = coord_fields
         .iter()
         .map(series_to_f64_vec)
         .collect::<PolarsResult<_>>()?;
 
-    // Group source rows by the "group dims" (extra coord fields missing from target).
     let source_n = coord_fields.first().map_or(0, |s| s.len());
-    let mut groups: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
-    if group_dim_indices.is_empty() {
-        groups.insert(Vec::new(), (0..source_n).collect());
-    } else {
-        for row_idx in 0..source_n {
-            let mut key: Vec<u64> = Vec::with_capacity(group_dim_indices.len());
-            for &d in &group_dim_indices {
-                key.push(coord_cols_all[d][row_idx].to_bits());
-            }
-            groups.entry(key).or_default().push(row_idx);
-        }
-    }
-
-    // Deterministic output ordering: sort groups by their group key (lexicographic).
-    let mut group_keys: Vec<Vec<u64>> = groups.keys().cloned().collect();
-    group_keys.sort();
-
-    // For dtype-preserving output of group dims, capture one representative row index per group.
-    // (All rows in a group share the same group-dim values by construction.)
-    let mut group_first_row: HashMap<Vec<u64>, usize> = HashMap::with_capacity(groups.len());
-    for (k, rows) in &groups {
-        let first = *rows
-            .first()
-            .ok_or_else(|| polars_err!(ComputeError: "empty group"))?;
-        group_first_row.insert(k.clone(), first);
-    }
+    let grouped = build_groups(&coord_cols_all, &group_dim_indices, source_n)?;
 
     let value_names: Vec<String> = value_fields.iter().map(|s| s.name().to_string()).collect();
     let value_cols: Vec<Vec<f64>> = value_fields
@@ -480,7 +544,6 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
         .map(series_to_f64_vec)
         .collect::<PolarsResult<_>>()?;
 
-    // Extract target coordinates from fields on interp_target struct series.
     let target_n = interp_target.len();
     let mut target_coord_cols: Vec<Vec<f64>> = Vec::with_capacity(interp_dim_indices.len());
     for name in &interp_dim_names {
@@ -491,19 +554,17 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
         target_coord_cols.push(series_to_f64_vec(s)?);
     }
 
-    // Interpolate each target row for every group.
     let mut out_value_cols: Vec<Vec<f64>> = value_names
         .iter()
-        .map(|_| Vec::with_capacity(target_n * group_keys.len()))
+        .map(|_| Vec::with_capacity(target_n * grouped.keys.len()))
         .collect();
 
     let interp_dims = interp_dim_indices.len();
     let method = kwargs.method.as_interpolator();
 
-    for group_key in &group_keys {
-        let rows = groups.get(group_key).expect("group key missing");
+    for group_key in &grouped.keys {
+        let rows = grouped.groups.get(group_key).expect("group key missing");
 
-        // Build axes (unique sorted coordinate values per interpolation dimension) within this group.
         let mut axes: Vec<Vec<f64>> = Vec::with_capacity(interp_dims);
         for &d in &interp_dim_indices {
             let mut axis: Vec<f64> = rows.iter().map(|&ri| coord_cols_all[d][ri]).collect();
@@ -515,20 +576,17 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
             axes.push(axis);
         }
 
-        // Map coordinate tuple -> row index in source (within this group).
         let mut coord_map: HashMap<Vec<u64>, usize> = HashMap::with_capacity(rows.len());
         for &row_idx in rows {
-            let mut key: Vec<u64> = Vec::with_capacity(interp_dims);
-            for &d in &interp_dim_indices {
-                key.push(coord_cols_all[d][row_idx].to_bits());
-            }
+            let key: Vec<u64> = interp_dim_indices
+                .iter()
+                .map(|&d| coord_cols_all[d][row_idx].to_bits())
+                .collect();
             coord_map.insert(key, row_idx);
         }
 
-        // Build flat row-major grids (one per value column) for the N-D engine.
         let total_grid: usize = axes.iter().map(|a| a.len()).product();
 
-        // Map axis-value bits → axis index, for each dimension
         let axis_idx_maps: Vec<HashMap<u64, usize>> = axes
             .iter()
             .map(|axis| {
@@ -539,7 +597,6 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
             })
             .collect();
 
-        // Strides for row-major layout
         let mut strides = vec![1usize; interp_dims];
         for d in (0..interp_dims.saturating_sub(1)).rev() {
             strides[d] = strides[d + 1] * axes[d + 1].len();
@@ -559,7 +616,6 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
             })
             .collect();
 
-        // Validate grid completeness
         for (vi, grid) in grids.iter().enumerate() {
             if grid.iter().any(|v| v.is_nan()) {
                 polars_bail!(
@@ -585,63 +641,322 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
         }
     }
 
-    // Build output struct series:
-    // - passthrough columns from interp_target (repeated once per group)
-    // - group columns (one per extra coord dim, repeated per target row)
-    // - interpolated value columns
-    let group_count = group_keys.len();
-    let out_n = target_n * group_count;
-    let mut out_fields: Vec<Series> =
-        Vec::with_capacity(target_fields.len() + group_dim_names.len() + value_names.len());
+    build_output_struct(
+        &target_fields,
+        &coord_fields,
+        &group_dim_names,
+        &group_dim_indices,
+        &value_names,
+        out_value_cols,
+        &grouped,
+        target_n,
+    )
+}
 
-    // Repeat target fields for each group (preserve dtype).
-    for s in &target_fields {
-        let name = s.name();
-        if group_dim_names.iter().any(|g| g == name) || value_names.iter().any(|v| v == name) {
-            polars_bail!(
-                InvalidOperation:
-                "duplicate output field name {} (present in interp_target and group/value fields)",
-                name
+// ---------------------------------------------------------------------------
+// Geospatial interpolation
+// ---------------------------------------------------------------------------
+
+fn default_geospatial_method() -> GeospatialMethod {
+    GeospatialMethod::TensorProduct
+}
+
+fn default_lon_range() -> LonRange {
+    LonRange::Auto
+}
+
+#[derive(Deserialize)]
+struct InterpGeospatialKwargs {
+    handle_missing: MissingHandling,
+    fill_value: Option<f64>,
+    extrapolate: bool,
+    #[serde(default = "default_geospatial_method")]
+    method: GeospatialMethod,
+    #[serde(default = "default_method")]
+    tensor_method: InterpolationMethod,
+    power: Option<f64>,
+    k_neighbors: Option<usize>,
+    rbf_kernel: Option<RbfKernel>,
+    rbf_epsilon: Option<f64>,
+    #[serde(default = "default_lon_range")]
+    lon_range: LonRange,
+}
+
+/// Build a lat/lon grid from grouped source rows.  Shared by `tensor_product`
+/// and `slerp` paths.
+fn build_latlon_grid(
+    rows: &[usize],
+    coord_cols: &[Vec<f64>],
+    value_cols: &[Vec<f64>],
+    value_names: &[String],
+    lon_range: &LonRange,
+) -> PolarsResult<(Vec<f64>, Vec<f64>, Vec<Vec<f64>>)> {
+    let mut lat_axis: Vec<f64> = rows.iter().map(|&ri| coord_cols[0][ri]).collect();
+    lat_axis.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    lat_axis.dedup();
+    if lat_axis.is_empty() {
+        polars_bail!(ComputeError: "empty latitude axis");
+    }
+
+    let raw_lons: Vec<f64> = rows.iter().map(|&ri| coord_cols[1][ri]).collect();
+    let (lon_axis, _lon_shift) = geospatial::normalize_longitudes(&raw_lons, lon_range);
+    if lon_axis.is_empty() {
+        polars_bail!(ComputeError: "empty longitude axis");
+    }
+
+    let n_lat = lat_axis.len();
+    let n_lon = lon_axis.len();
+
+    let lon_base = lon_axis[0];
+    let mut coord_map: HashMap<(u64, u64), usize> = HashMap::with_capacity(rows.len());
+    for &row_idx in rows {
+        let lat_val = coord_cols[0][row_idx];
+        let lon_val = geospatial::normalize_target_lon(
+            geospatial::normalize_lon(coord_cols[1][row_idx], lon_range),
+            lon_base,
+        );
+        coord_map.insert((lat_val.to_bits(), lon_val.to_bits()), row_idx);
+    }
+
+    let lat_idx_map: HashMap<u64, usize> = lat_axis
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v.to_bits(), i))
+        .collect();
+    let lon_idx_map: HashMap<u64, usize> = lon_axis
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v.to_bits(), i))
+        .collect();
+
+    let total_grid = n_lat * n_lon;
+    let grids: Vec<Vec<f64>> = value_cols
+        .iter()
+        .enumerate()
+        .map(|(vi, col)| {
+            let mut grid = vec![f64::NAN; total_grid];
+            for (&(lat_b, lon_b), &src_row) in &coord_map {
+                if let (Some(&li), Some(&loi)) =
+                    (lat_idx_map.get(&lat_b), lon_idx_map.get(&lon_b))
+                {
+                    grid[li * n_lon + loi] = col[src_row];
+                }
+            }
+            if grid.iter().any(|v| v.is_nan()) {
+                polars_bail!(
+                    ComputeError:
+                    "source grid missing points for value '{}'; ensure source is a full cartesian grid within each group",
+                    value_names[vi]
+                );
+            }
+            Ok(grid)
+        })
+        .collect::<PolarsResult<_>>()?;
+
+    Ok((lat_axis, lon_axis, grids))
+}
+
+#[polars_expr(output_type_func=same_output_type)]
+fn interpolate_geospatial(
+    inputs: &[Series],
+    kwargs: InterpGeospatialKwargs,
+) -> PolarsResult<Series> {
+    let source_coords = inputs[0].struct_()?;
+    let source_values = inputs[1].struct_()?;
+    let interp_target = inputs[2].struct_()?;
+
+    let coord_fields_raw = source_coords.fields_as_series();
+    if coord_fields_raw.len() < 2 {
+        polars_bail!(
+            InvalidOperation:
+            "interpolate_geospatial requires at least 2 coordinate fields (lat, lon), got {}",
+            coord_fields_raw.len()
+        );
+    }
+    let value_fields_raw = source_values.fields_as_series();
+    if value_fields_raw.is_empty() {
+        polars_bail!(InvalidOperation: "expected at least 1 value field for interpolation");
+    }
+
+    let (coord_fields, value_fields) = preprocess_sources(
+        coord_fields_raw,
+        value_fields_raw,
+        &kwargs.handle_missing,
+        kwargs.fill_value,
+    )?;
+
+    let lat_name = coord_fields[0].name().to_string();
+    let lon_name = coord_fields[1].name().to_string();
+
+    let target_fields = interp_target.fields_as_series();
+    let target_name_set: std::collections::HashSet<PlSmallStr> =
+        target_fields.iter().map(|s| s.name().clone()).collect();
+
+    if !target_name_set.contains(lat_name.as_str()) {
+        polars_bail!(
+            InvalidOperation: "interp_target missing latitude field '{}'", lat_name
+        );
+    }
+    if !target_name_set.contains(lon_name.as_str()) {
+        polars_bail!(
+            InvalidOperation: "interp_target missing longitude field '{}'", lon_name
+        );
+    }
+
+    let mut group_dim_names: Vec<String> = Vec::new();
+    let mut group_dim_indices: Vec<usize> = Vec::new();
+    for (idx, s) in coord_fields.iter().enumerate().skip(2) {
+        if !target_name_set.contains(s.name()) {
+            group_dim_indices.push(idx);
+            group_dim_names.push(s.name().to_string());
+        }
+    }
+
+    let coord_cols_all: Vec<Vec<f64>> = coord_fields
+        .iter()
+        .map(series_to_f64_vec)
+        .collect::<PolarsResult<_>>()?;
+
+    let resolved_lon_range =
+        geospatial::resolve_lon_range(&coord_cols_all[1], &kwargs.lon_range);
+
+    let source_n = coord_fields.first().map_or(0, |s| s.len());
+    let grouped = build_groups(&coord_cols_all, &group_dim_indices, source_n)?;
+
+    let value_names: Vec<String> = value_fields.iter().map(|s| s.name().to_string()).collect();
+    let value_cols: Vec<Vec<f64>> = value_fields
+        .iter()
+        .map(series_to_f64_vec)
+        .collect::<PolarsResult<_>>()?;
+
+    let target_n = interp_target.len();
+    let target_lat_vec = {
+        let s = target_fields
+            .iter()
+            .find(|s| s.name() == lat_name.as_str())
+            .unwrap();
+        series_to_f64_vec(s)?
+    };
+    let target_lon_vec = {
+        let s = target_fields
+            .iter()
+            .find(|s| s.name() == lon_name.as_str())
+            .unwrap();
+        series_to_f64_vec(s)?
+    };
+
+    let mut out_value_cols: Vec<Vec<f64>> = value_names
+        .iter()
+        .map(|_| Vec::with_capacity(target_n * grouped.keys.len()))
+        .collect();
+
+    match kwargs.method {
+        GeospatialMethod::TensorProduct | GeospatialMethod::Slerp => {
+            let is_tensor = matches!(kwargs.method, GeospatialMethod::TensorProduct);
+            let tensor_method = kwargs.tensor_method.as_interpolator();
+
+            for group_key in &grouped.keys {
+                let rows = grouped.groups.get(group_key).expect("group key missing");
+                let (lat_axis, lon_axis, grids) = build_latlon_grid(
+                    rows,
+                    &coord_cols_all,
+                    &value_cols,
+                    &value_names,
+                    &resolved_lon_range,
+                )?;
+
+                let (final_lon_axis, final_grids) =
+                    geospatial::preprocess_geo_grids(&lat_axis, &lon_axis, grids);
+
+                let lon_norm_base = lon_axis[0];
+                for row in 0..target_n {
+                    let target_lat = target_lat_vec[row];
+                    let target_lon = geospatial::normalize_target_lon(
+                        geospatial::normalize_lon(target_lon_vec[row], &resolved_lon_range),
+                        lon_norm_base,
+                    );
+
+                    for (vi, grid) in final_grids.iter().enumerate() {
+                        let val = if is_tensor {
+                            let axis_refs: Vec<&[f64]> =
+                                vec![lat_axis.as_slice(), final_lon_axis.as_slice()];
+                            interpolation::interpolate_grid(
+                                &axis_refs,
+                                grid,
+                                &[target_lat, target_lon],
+                                tensor_method,
+                                kwargs.extrapolate,
+                            )
+                        } else {
+                            geospatial::slerp_bilinear(
+                                &lat_axis,
+                                &final_lon_axis,
+                                grid,
+                                target_lat,
+                                target_lon,
+                                kwargs.extrapolate,
+                            )
+                        };
+                        out_value_cols[vi].push(val);
+                    }
+                }
+            }
+        }
+
+        GeospatialMethod::Idw | GeospatialMethod::Rbf => {
+            let power = kwargs.power.unwrap_or(2.0);
+            let k = kwargs.k_neighbors.unwrap_or(
+                if matches!(kwargs.method, GeospatialMethod::Rbf) { 20 } else { 0 },
             );
+            let kernel = kwargs.rbf_kernel.unwrap_or(RbfKernel::ThinPlateSpline);
+            let epsilon = kwargs.rbf_epsilon.unwrap_or(f64::NAN);
+            let is_idw = matches!(kwargs.method, GeospatialMethod::Idw);
+
+            for group_key in &grouped.keys {
+                let rows = grouped.groups.get(group_key).expect("group key missing");
+
+                let src_lats: Vec<f64> = rows.iter().map(|&ri| coord_cols_all[0][ri]).collect();
+                let src_lons: Vec<f64> = rows
+                    .iter()
+                    .map(|&ri| geospatial::normalize_lon(coord_cols_all[1][ri], &resolved_lon_range))
+                    .collect();
+
+                for row in 0..target_n {
+                    let target_lat = target_lat_vec[row];
+                    let target_lon = geospatial::normalize_lon(
+                        target_lon_vec[row],
+                        &resolved_lon_range,
+                    );
+
+                    for (vi, col) in value_cols.iter().enumerate() {
+                        let src_vals: Vec<f64> =
+                            rows.iter().map(|&ri| col[ri]).collect();
+                        let val = if is_idw {
+                            geospatial::idw_haversine(
+                                &src_lats, &src_lons, &src_vals,
+                                target_lat, target_lon, power, k,
+                            )
+                        } else {
+                            geospatial::rbf_haversine(
+                                &src_lats, &src_lons, &src_vals,
+                                target_lat, target_lon, kernel, epsilon, k,
+                            )
+                        };
+                        out_value_cols[vi].push(val);
+                    }
+                }
+            }
         }
-        let mut out = s.clone();
-        for _ in 1..group_count {
-            out.append(s)?;
-        }
-        out_fields.push(out);
     }
 
-    // Add group fields (preserve dtype) repeated for each target row, per group.
-    for (pos, name) in group_dim_names.iter().enumerate() {
-        if value_names.iter().any(|v| v == name) {
-            polars_bail!(
-                InvalidOperation:
-                "duplicate output field name {} (present in coords group field and values)",
-                name
-            );
-        }
-        let src_series = &coord_fields[group_dim_indices[pos]];
-        let dtype = src_series.dtype().clone();
-
-        let mut vals: Vec<AnyValue<'static>> = Vec::with_capacity(out_n);
-        for gkey in &group_keys {
-            let first_row = *group_first_row
-                .get(gkey)
-                .ok_or_else(|| polars_err!(ComputeError: "missing group representative row"))?;
-            let av = src_series.get(first_row)?.into_static();
-            vals.extend(std::iter::repeat_n(av, target_n));
-        }
-        out_fields.push(Series::from_any_values_and_dtype(
-            name.as_str().into(),
-            &vals,
-            &dtype,
-            true,
-        )?);
-    }
-
-    // Add interpolated value columns.
-    for (name, vals) in value_names.iter().zip(out_value_cols.into_iter()) {
-        out_fields.push(Series::new(name.as_str().into(), vals));
-    }
-    Ok(StructChunked::from_series("interpolated".into(), out_n, out_fields.iter())?.into_series())
+    build_output_struct(
+        &target_fields,
+        &coord_fields,
+        &group_dim_names,
+        &group_dim_indices,
+        &value_names,
+        out_value_cols,
+        &grouped,
+        target_n,
+    )
 }
