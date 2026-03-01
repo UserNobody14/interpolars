@@ -3,6 +3,8 @@ use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::interpolation::{self, InterpolationMethod};
+
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MissingHandling {
@@ -17,6 +19,12 @@ struct InterpolateKwargs {
     handle_missing: MissingHandling,
     fill_value: Option<f64>,
     extrapolate: bool,
+    #[serde(default = "default_method")]
+    method: InterpolationMethod,
+}
+
+fn default_method() -> InterpolationMethod {
+    InterpolationMethod::Linear
 }
 
 /// Output type is a concatenation of:
@@ -341,41 +349,6 @@ fn preprocess_sources(
     }
 }
 
-fn lower_upper_indices(axis: &[f64], t: f64, extrapolate: bool) -> (usize, usize) {
-    debug_assert!(!axis.is_empty());
-    if t <= axis[0] {
-        if extrapolate && axis.len() > 1 {
-            return (0, 1);
-        }
-        return (0, 0);
-    }
-    let last = axis.len() - 1;
-    if t >= axis[last] {
-        if extrapolate && last > 0 {
-            return (last - 1, last);
-        }
-        return (last, last);
-    }
-
-    // Find first index with axis[i] >= t
-    let mut lo = 0usize;
-    let mut hi = last;
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if axis[mid] < t {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    let idx = lo;
-    if axis[idx] == t {
-        (idx, idx)
-    } else {
-        (idx - 1, idx)
-    }
-}
-
 #[polars_expr(output_type_func=same_output_type)]
 fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<Series> {
     // inputs[0]: source coordinates as a Struct (e.g. {xfield, yfield, ...})
@@ -525,6 +498,8 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
         .collect();
 
     let interp_dims = interp_dim_indices.len();
+    let method = kwargs.method.as_interpolator();
+
     for group_key in &group_keys {
         let rows = groups.get(group_key).expect("group key missing");
 
@@ -544,89 +519,68 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
         let mut coord_map: HashMap<Vec<u64>, usize> = HashMap::with_capacity(rows.len());
         for &row_idx in rows {
             let mut key: Vec<u64> = Vec::with_capacity(interp_dims);
-            for (pos, &d) in interp_dim_indices.iter().enumerate() {
-                let _ = pos; // positional alignment with axes
+            for &d in &interp_dim_indices {
                 key.push(coord_cols_all[d][row_idx].to_bits());
             }
             coord_map.insert(key, row_idx);
         }
 
+        // Build flat row-major grids (one per value column) for the N-D engine.
+        let total_grid: usize = axes.iter().map(|a| a.len()).product();
+
+        // Map axis-value bits → axis index, for each dimension
+        let axis_idx_maps: Vec<HashMap<u64, usize>> = axes
+            .iter()
+            .map(|axis| {
+                axis.iter()
+                    .enumerate()
+                    .map(|(i, &v)| (v.to_bits(), i))
+                    .collect()
+            })
+            .collect();
+
+        // Strides for row-major layout
+        let mut strides = vec![1usize; interp_dims];
+        for d in (0..interp_dims.saturating_sub(1)).rev() {
+            strides[d] = strides[d + 1] * axes[d + 1].len();
+        }
+
+        let grids: Vec<Vec<f64>> = value_cols
+            .iter()
+            .map(|col| {
+                let mut grid = vec![f64::NAN; total_grid];
+                for (key, &src_row) in &coord_map {
+                    let flat_idx: usize = (0..interp_dims)
+                        .map(|d| axis_idx_maps[d][&key[d]] * strides[d])
+                        .sum();
+                    grid[flat_idx] = col[src_row];
+                }
+                grid
+            })
+            .collect();
+
+        // Validate grid completeness
+        for (vi, grid) in grids.iter().enumerate() {
+            if grid.iter().any(|v| v.is_nan()) {
+                polars_bail!(
+                    ComputeError:
+                    "source grid missing points for value '{}'; ensure source is a full cartesian grid within each group",
+                    value_names[vi]
+                );
+            }
+        }
+
+        let axis_refs: Vec<&[f64]> = axes.iter().map(|a| a.as_slice()).collect();
+
         for row in 0..target_n {
-            let mut lo_idx: Vec<usize> = Vec::with_capacity(interp_dims);
-            let mut hi_idx: Vec<usize> = Vec::with_capacity(interp_dims);
-            let mut tvals: Vec<f64> = Vec::with_capacity(interp_dims);
+            let target_pt: Vec<f64> = (0..interp_dims)
+                .map(|d| target_coord_cols[d][row])
+                .collect();
 
-            for d in 0..interp_dims {
-                let t = target_coord_cols[d][row];
-                tvals.push(t);
-                let (lo, hi) = lower_upper_indices(&axes[d], t, kwargs.extrapolate);
-                lo_idx.push(lo);
-                hi_idx.push(hi);
-            }
-
-            let corners = 1usize << interp_dims;
-            let mut sums: Vec<f64> = vec![0.0; value_names.len()];
-
-            for corner in 0..corners {
-                let mut weight = 1.0f64;
-                let mut key: Vec<u64> = Vec::with_capacity(interp_dims);
-
-                for d in 0..interp_dims {
-                    let lo = lo_idx[d];
-                    let hi = hi_idx[d];
-                    let t = tvals[d];
-                    let use_hi = (corner >> d) & 1 == 1;
-
-                    if lo == hi {
-                        // clamped or exact hit
-                        key.push(axes[d][lo].to_bits());
-                        // Avoid overcounting duplicate corners when a dimension isn't interpolating.
-                        // Only the "lo" branch should contribute.
-                        if use_hi {
-                            weight = 0.0;
-                        }
-                        continue;
-                    }
-
-                    let x0 = axes[d][lo];
-                    let x1 = axes[d][hi];
-                    let denom = x1 - x0;
-                    if denom == 0.0 {
-                        polars_bail!(
-                            ComputeError:
-                            "zero grid spacing for axis {}",
-                            interp_dim_names[d]
-                        );
-                    }
-
-                    if use_hi {
-                        weight *= (t - x0) / denom;
-                        key.push(x1.to_bits());
-                    } else {
-                        weight *= (x1 - t) / denom;
-                        key.push(x0.to_bits());
-                    }
-                }
-
-                if weight == 0.0 {
-                    continue;
-                }
-
-                let src_row = coord_map.get(&key).copied().ok_or_else(|| {
-                    polars_err!(
-                        ComputeError:
-                        "source grid missing corner point for key {:?}; ensure source is a full cartesian grid within each group",
-                        key
-                    )
-                })?;
-
-                for (vi, col) in value_cols.iter().enumerate() {
-                    sums[vi] += weight * col[src_row];
-                }
-            }
-
-            for (vi, s) in sums.into_iter().enumerate() {
-                out_value_cols[vi].push(s);
+            for (vi, grid) in grids.iter().enumerate() {
+                let val =
+                    interpolation::interpolate_grid(&axis_refs, grid, &target_pt, method, kwargs.extrapolate);
+                out_value_cols[vi].push(val);
             }
         }
     }
