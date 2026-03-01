@@ -13,16 +13,19 @@ crate-type = ["cdylib"]
 # "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
 pyo3 = { version = "0.27.2", features = ["abi3-py39"] }
 # Get polars from git
-polars = { git = "https://github.com/pola-rs/polars.git", tag = "py-1.37.1", default-features = false, features = [
+polars = { git = "https://github.com/pola-rs/polars.git", rev = "099564e917b41845217e49e0e3c47cb22b7e8484", default-features = false, features = [
     "dtype-struct",
     "dtype-full",
 ] }
-pyo3-polars = { git = "https://github.com/pola-rs/polars.git", tag = "py-1.37.1", default-features = false, features = [
+pyo3-polars = { git = "https://github.com/pola-rs/polars.git", rev = "099564e917b41845217e49e0e3c47cb22b7e8484", default-features = false, features = [
     "derive",
 ] }
 
 serde_json = "1.0.145"
 serde = "1.0.213"
+
+scirs2-interpolate = { git = "https://github.com/UserNobody14/scirs"}
+ndarray = "0.17"
 
 
 # Allow cargo test via putting extension lib in feature flag

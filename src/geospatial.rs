@@ -48,7 +48,11 @@ impl RbfKernel {
         match self {
             Self::Linear => d,
             Self::ThinPlateSpline => {
-                if d < 1e-18 { 0.0 } else { d * d * d.ln() }
+                if d < 1e-18 {
+                    0.0
+                } else {
+                    d * d * d.ln()
+                }
             }
             Self::Cubic => d * d * d,
             Self::Gaussian => (-(d / epsilon).powi(2)).exp(),
@@ -162,11 +166,7 @@ pub fn detect_wrapping(lon_axis: &[f64]) -> bool {
 
 /// Extend a 2-D grid's longitude dimension with ghost points for periodic
 /// wrapping.  The grid is in row-major `[n_lat, n_lon]` layout.
-pub fn extend_lon_grid(
-    n_lat: usize,
-    lon_axis: &[f64],
-    grid: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+pub fn extend_lon_grid(n_lat: usize, lon_axis: &[f64], grid: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let n_lon = lon_axis.len();
     let k = n_lon.saturating_sub(1).min(3);
     if k == 0 {
@@ -299,16 +299,32 @@ pub fn slerp_bilinear(
         return grid[0];
     }
 
-    let i_lat = if n_lat >= 2 { find_interval(lat_axis, target_lat) } else { 0 };
-    let i_lon = if n_lon >= 2 { find_interval(lon_axis, target_lon) } else { 0 };
+    let i_lat = if n_lat >= 2 {
+        find_interval(lat_axis, target_lat)
+    } else {
+        0
+    };
+    let i_lon = if n_lon >= 2 {
+        find_interval(lon_axis, target_lon)
+    } else {
+        0
+    };
 
     let lat_lo = lat_axis[i_lat];
-    let lat_hi = if n_lat >= 2 { lat_axis[i_lat + 1] } else { lat_lo };
+    let lat_hi = if n_lat >= 2 {
+        lat_axis[i_lat + 1]
+    } else {
+        lat_lo
+    };
     let s = if (lat_hi - lat_lo).abs() < 1e-15 {
         0.0
     } else {
         let raw = (target_lat - lat_lo) / (lat_hi - lat_lo);
-        if extrapolate { raw } else { raw.clamp(0.0, 1.0) }
+        if extrapolate {
+            raw
+        } else {
+            raw.clamp(0.0, 1.0)
+        }
     };
 
     let gv = |li: usize, loi: usize| grid[li * n_lon + loi];
@@ -334,11 +350,19 @@ pub fn slerp_bilinear(
         }
         let d_t = angular_distance_on_parallel(lat, dlon_target);
         let raw = d_t / d_full;
-        if extrapolate { raw } else { raw.clamp(0.0, 1.0) }
+        if extrapolate {
+            raw
+        } else {
+            raw.clamp(0.0, 1.0)
+        }
     };
 
     let t_bot = slerp_lon_frac(lat_lo);
-    let t_top = if n_lat < 2 { t_bot } else { slerp_lon_frac(lat_hi) };
+    let t_top = if n_lat < 2 {
+        t_bot
+    } else {
+        slerp_lon_frac(lat_hi)
+    };
 
     let v00 = gv(i_lat, i_lon);
     let v01 = gv(i_lat, i_lon + 1);
@@ -404,30 +428,6 @@ pub fn idw_haversine(
         v_sum += w * src_vals[idx];
     }
     v_sum / w_sum
-}
-
-/// Nearest-neighbor lookup using Haversine distance.
-pub fn nearest_haversine(
-    src_lats: &[f64],
-    src_lons: &[f64],
-    src_vals: &[f64],
-    target_lat: f64,
-    target_lon: f64,
-) -> f64 {
-    let n = src_lats.len();
-    if n == 0 {
-        return f64::NAN;
-    }
-    let mut best_d = f64::INFINITY;
-    let mut best_v = src_vals[0];
-    for i in 0..n {
-        let d = haversine_rad(target_lat, target_lon, src_lats[i], src_lons[i]);
-        if d < best_d {
-            best_d = d;
-            best_v = src_vals[i];
-        }
-    }
-    best_v
 }
 
 // ---------------------------------------------------------------------------
@@ -499,7 +499,12 @@ pub fn rbf_haversine(
     let use_k = if k == 0 || k > n { n } else { k };
 
     let mut dists: Vec<(f64, usize)> = (0..n)
-        .map(|i| (haversine_rad(target_lat, target_lon, src_lats[i], src_lons[i]), i))
+        .map(|i| {
+            (
+                haversine_rad(target_lat, target_lon, src_lats[i], src_lons[i]),
+                i,
+            )
+        })
         .collect();
 
     if use_k < n {
@@ -526,8 +531,10 @@ pub fn rbf_haversine(
         for i in 0..kk {
             for j in (i + 1)..kk {
                 pair_dists.push(haversine_rad(
-                    src_lats[indices[i]], src_lons[indices[i]],
-                    src_lats[indices[j]], src_lons[indices[j]],
+                    src_lats[indices[i]],
+                    src_lons[indices[i]],
+                    src_lats[indices[j]],
+                    src_lons[indices[j]],
                 ));
             }
         }
@@ -544,8 +551,10 @@ pub fn rbf_haversine(
         phi[i * kk + i] = kernel.eval(0.0, eps);
         for j in (i + 1)..kk {
             let d = haversine_rad(
-                src_lats[indices[i]], src_lons[indices[i]],
-                src_lats[indices[j]], src_lons[indices[j]],
+                src_lats[indices[i]],
+                src_lons[indices[i]],
+                src_lats[indices[j]],
+                src_lons[indices[j]],
             );
             let v = kernel.eval(d, eps);
             phi[i * kk + j] = v;
@@ -576,7 +585,11 @@ mod tests {
     use super::*;
 
     fn approx_eq(a: f64, b: f64, tol: f64) {
-        assert!((a - b).abs() < tol, "expected {a} ≈ {b} (diff = {})", (a - b).abs());
+        assert!(
+            (a - b).abs() < tol,
+            "expected {a} ≈ {b} (diff = {})",
+            (a - b).abs()
+        );
     }
 
     // --- Longitude normalization ---
@@ -598,8 +611,14 @@ mod tests {
 
     #[test]
     fn resolve_lon_range_auto() {
-        assert_eq!(resolve_lon_range(&[-10.0, 20.0], &LonRange::Auto), LonRange::Signed180);
-        assert_eq!(resolve_lon_range(&[10.0, 350.0], &LonRange::Auto), LonRange::Unsigned360);
+        assert_eq!(
+            resolve_lon_range(&[-10.0, 20.0], &LonRange::Auto),
+            LonRange::Signed180
+        );
+        assert_eq!(
+            resolve_lon_range(&[10.0, 350.0], &LonRange::Auto),
+            LonRange::Unsigned360
+        );
     }
 
     #[test]
@@ -611,10 +630,8 @@ mod tests {
 
     #[test]
     fn normalize_lons_idl_crossing() {
-        let (axis, shift) = normalize_longitudes(
-            &[170.0, 175.0, 180.0, -175.0, -170.0],
-            &LonRange::Signed180,
-        );
+        let (axis, shift) =
+            normalize_longitudes(&[170.0, 175.0, 180.0, -175.0, -170.0], &LonRange::Signed180);
         assert!(shift > 0.0);
         for w in axis.windows(2) {
             assert!(w[1] > w[0], "axis should be sorted ascending: {axis:?}");
@@ -653,13 +670,15 @@ mod tests {
         let lat = vec![-90.0, 0.0, 90.0];
         let n_lon = 4;
         let mut grid = vec![
-            1.0, 2.0, 3.0, 4.0,
-            5.0, 6.0, 7.0, 8.0,
-            10.0, 20.0, 30.0, 40.0,
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 20.0, 30.0, 40.0,
         ];
         average_pole_rows(&lat, n_lon, &mut grid);
-        for i in 0..n_lon { approx_eq(grid[i], 2.5, 1e-12); }
-        for i in 0..n_lon { approx_eq(grid[2 * n_lon + i], 25.0, 1e-12); }
+        for i in 0..n_lon {
+            approx_eq(grid[i], 2.5, 1e-12);
+        }
+        for i in 0..n_lon {
+            approx_eq(grid[2 * n_lon + i], 25.0, 1e-12);
+        }
         assert_eq!(grid[4..8], [5.0, 6.0, 7.0, 8.0]);
     }
 
@@ -679,12 +698,20 @@ mod tests {
 
     #[test]
     fn haversine_antipodal() {
-        approx_eq(haversine_rad(0.0, 0.0, 0.0, 180.0), std::f64::consts::PI, 1e-10);
+        approx_eq(
+            haversine_rad(0.0, 0.0, 0.0, 180.0),
+            std::f64::consts::PI,
+            1e-10,
+        );
     }
 
     #[test]
     fn haversine_quarter_circle() {
-        approx_eq(haversine_rad(0.0, 0.0, 90.0, 0.0), std::f64::consts::FRAC_PI_2, 1e-10);
+        approx_eq(
+            haversine_rad(0.0, 0.0, 90.0, 0.0),
+            std::f64::consts::FRAC_PI_2,
+            1e-10,
+        );
     }
 
     #[test]
@@ -700,10 +727,26 @@ mod tests {
         let lat = vec![0.0, 10.0];
         let lon = vec![0.0, 10.0];
         let grid = vec![1.0, 2.0, 3.0, 4.0];
-        approx_eq(slerp_bilinear(&lat, &lon, &grid, 0.0, 0.0, false), 1.0, 1e-12);
-        approx_eq(slerp_bilinear(&lat, &lon, &grid, 0.0, 10.0, false), 2.0, 1e-12);
-        approx_eq(slerp_bilinear(&lat, &lon, &grid, 10.0, 0.0, false), 3.0, 1e-12);
-        approx_eq(slerp_bilinear(&lat, &lon, &grid, 10.0, 10.0, false), 4.0, 1e-12);
+        approx_eq(
+            slerp_bilinear(&lat, &lon, &grid, 0.0, 0.0, false),
+            1.0,
+            1e-12,
+        );
+        approx_eq(
+            slerp_bilinear(&lat, &lon, &grid, 0.0, 10.0, false),
+            2.0,
+            1e-12,
+        );
+        approx_eq(
+            slerp_bilinear(&lat, &lon, &grid, 10.0, 0.0, false),
+            3.0,
+            1e-12,
+        );
+        approx_eq(
+            slerp_bilinear(&lat, &lon, &grid, 10.0, 10.0, false),
+            4.0,
+            1e-12,
+        );
     }
 
     #[test]
@@ -711,7 +754,11 @@ mod tests {
         let lat = vec![0.0, 10.0];
         let lon = vec![0.0, 10.0];
         let grid = vec![0.0, 10.0, 10.0, 20.0];
-        approx_eq(slerp_bilinear(&lat, &lon, &grid, 5.0, 5.0, false), 10.0, 0.1);
+        approx_eq(
+            slerp_bilinear(&lat, &lon, &grid, 5.0, 5.0, false),
+            10.0,
+            0.1,
+        );
     }
 
     #[test]
@@ -730,7 +777,11 @@ mod tests {
         let lats = vec![0.0, 10.0, 20.0];
         let lons = vec![0.0, 10.0, 20.0];
         let vals = vec![100.0, 200.0, 300.0];
-        approx_eq(idw_haversine(&lats, &lons, &vals, 10.0, 10.0, 2.0, 0), 200.0, 1e-10);
+        approx_eq(
+            idw_haversine(&lats, &lons, &vals, 10.0, 10.0, 2.0, 0),
+            200.0,
+            1e-10,
+        );
     }
 
     #[test]
@@ -738,7 +789,11 @@ mod tests {
         let lats = vec![0.0, 0.0];
         let lons = vec![-10.0, 10.0];
         let vals = vec![100.0, 200.0];
-        approx_eq(idw_haversine(&lats, &lons, &vals, 0.0, 0.0, 2.0, 0), 150.0, 1e-10);
+        approx_eq(
+            idw_haversine(&lats, &lons, &vals, 0.0, 0.0, 2.0, 0),
+            150.0,
+            1e-10,
+        );
     }
 
     #[test]
@@ -751,14 +806,6 @@ mod tests {
         assert!((v2 - 15.0).abs() < (v_all - 15.0).abs());
     }
 
-    #[test]
-    fn nearest_haversine_basic() {
-        let lats = vec![0.0, 60.0, 60.0];
-        let lons = vec![0.0, 0.0, 1.0];
-        let vals = vec![100.0, 200.0, 300.0];
-        approx_eq(nearest_haversine(&lats, &lons, &vals, 59.5, 0.5), 200.0, 1e-10);
-    }
-
     // --- RBF ---
 
     #[test]
@@ -767,8 +814,18 @@ mod tests {
         let lons = vec![0.0, 10.0, 20.0];
         let vals = vec![1.0, 2.0, 3.0];
         approx_eq(
-            rbf_haversine(&lats, &lons, &vals, 10.0, 10.0, RbfKernel::ThinPlateSpline, f64::NAN, 0),
-            2.0, 1e-10,
+            rbf_haversine(
+                &lats,
+                &lons,
+                &vals,
+                10.0,
+                10.0,
+                RbfKernel::ThinPlateSpline,
+                f64::NAN,
+                0,
+            ),
+            2.0,
+            1e-10,
         );
     }
 
@@ -778,8 +835,18 @@ mod tests {
         let lons = vec![0.0, 10.0, 0.0, 10.0];
         let vals = vec![0.0, 10.0, 10.0, 20.0];
         approx_eq(
-            rbf_haversine(&lats, &lons, &vals, 5.0, 5.0, RbfKernel::Gaussian, f64::NAN, 0),
-            10.0, 1.0,
+            rbf_haversine(
+                &lats,
+                &lons,
+                &vals,
+                5.0,
+                5.0,
+                RbfKernel::Gaussian,
+                f64::NAN,
+                0,
+            ),
+            10.0,
+            1.0,
         );
     }
 
@@ -789,8 +856,12 @@ mod tests {
         let lons = vec![0.0, 10.0, 0.0, 10.0, 5.0];
         let vals = vec![0.0, 10.0, 10.0, 20.0, 10.0];
         for kernel in [
-            RbfKernel::Linear, RbfKernel::ThinPlateSpline, RbfKernel::Cubic,
-            RbfKernel::Gaussian, RbfKernel::Multiquadric, RbfKernel::InverseMultiquadric,
+            RbfKernel::Linear,
+            RbfKernel::ThinPlateSpline,
+            RbfKernel::Cubic,
+            RbfKernel::Gaussian,
+            RbfKernel::Multiquadric,
+            RbfKernel::InverseMultiquadric,
         ] {
             let v = rbf_haversine(&lats, &lons, &vals, 5.0, 5.0, kernel, f64::NAN, 0);
             assert!(v.is_finite(), "kernel {kernel:?} returned non-finite: {v}");

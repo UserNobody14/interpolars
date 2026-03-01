@@ -161,9 +161,7 @@ fn reconcile_temporal_dtype(dt1: &DataType, dt2: &DataType) -> Option<DataType> 
             Some(DataType::Duration(finest_time_unit(*tu1, *tu2)))
         }
         (DataType::Date, DataType::Datetime(tu, tz))
-        | (DataType::Datetime(tu, tz), DataType::Date) => {
-            Some(DataType::Datetime(*tu, tz.clone()))
-        }
+        | (DataType::Datetime(tu, tz), DataType::Date) => Some(DataType::Datetime(*tu, tz.clone())),
         _ => None,
     }
 }
@@ -376,7 +374,11 @@ fn build_groups(
         first_row.insert(k.clone(), first);
     }
 
-    Ok(GroupedRows { groups, keys, first_row })
+    Ok(GroupedRows {
+        groups,
+        keys,
+        first_row,
+    })
 }
 
 /// Build output struct series from computed value columns.
@@ -560,7 +562,6 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
         .collect();
 
     let interp_dims = interp_dim_indices.len();
-    let method = kwargs.method.as_interpolator();
 
     for group_key in &grouped.keys {
         let rows = grouped.groups.get(group_key).expect("group key missing");
@@ -634,8 +635,13 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
                 .collect();
 
             for (vi, grid) in grids.iter().enumerate() {
-                let val =
-                    interpolation::interpolate_grid(&axis_refs, grid, &target_pt, method, kwargs.extrapolate);
+                let val = interpolation::interpolate_grid(
+                    &axis_refs,
+                    grid,
+                    &target_pt,
+                    kwargs.method,
+                    kwargs.extrapolate,
+                );
                 out_value_cols[vi].push(val);
             }
         }
@@ -817,8 +823,7 @@ fn interpolate_geospatial(
         .map(series_to_f64_vec)
         .collect::<PolarsResult<_>>()?;
 
-    let resolved_lon_range =
-        geospatial::resolve_lon_range(&coord_cols_all[1], &kwargs.lon_range);
+    let resolved_lon_range = geospatial::resolve_lon_range(&coord_cols_all[1], &kwargs.lon_range);
 
     let source_n = coord_fields.first().map_or(0, |s| s.len());
     let grouped = build_groups(&coord_cols_all, &group_dim_indices, source_n)?;
@@ -853,7 +858,6 @@ fn interpolate_geospatial(
     match kwargs.method {
         GeospatialMethod::TensorProduct | GeospatialMethod::Slerp => {
             let is_tensor = matches!(kwargs.method, GeospatialMethod::TensorProduct);
-            let tensor_method = kwargs.tensor_method.as_interpolator();
 
             for group_key in &grouped.keys {
                 let rows = grouped.groups.get(group_key).expect("group key missing");
@@ -884,7 +888,7 @@ fn interpolate_geospatial(
                                 &axis_refs,
                                 grid,
                                 &[target_lat, target_lon],
-                                tensor_method,
+                                kwargs.tensor_method,
                                 kwargs.extrapolate,
                             )
                         } else {
@@ -905,9 +909,14 @@ fn interpolate_geospatial(
 
         GeospatialMethod::Idw | GeospatialMethod::Rbf => {
             let power = kwargs.power.unwrap_or(2.0);
-            let k = kwargs.k_neighbors.unwrap_or(
-                if matches!(kwargs.method, GeospatialMethod::Rbf) { 20 } else { 0 },
-            );
+            let k =
+                kwargs
+                    .k_neighbors
+                    .unwrap_or(if matches!(kwargs.method, GeospatialMethod::Rbf) {
+                        20
+                    } else {
+                        0
+                    });
             let kernel = kwargs.rbf_kernel.unwrap_or(RbfKernel::ThinPlateSpline);
             let epsilon = kwargs.rbf_epsilon.unwrap_or(f64::NAN);
             let is_idw = matches!(kwargs.method, GeospatialMethod::Idw);
@@ -918,28 +927,26 @@ fn interpolate_geospatial(
                 let src_lats: Vec<f64> = rows.iter().map(|&ri| coord_cols_all[0][ri]).collect();
                 let src_lons: Vec<f64> = rows
                     .iter()
-                    .map(|&ri| geospatial::normalize_lon(coord_cols_all[1][ri], &resolved_lon_range))
+                    .map(|&ri| {
+                        geospatial::normalize_lon(coord_cols_all[1][ri], &resolved_lon_range)
+                    })
                     .collect();
 
                 for row in 0..target_n {
                     let target_lat = target_lat_vec[row];
-                    let target_lon = geospatial::normalize_lon(
-                        target_lon_vec[row],
-                        &resolved_lon_range,
-                    );
+                    let target_lon =
+                        geospatial::normalize_lon(target_lon_vec[row], &resolved_lon_range);
 
                     for (vi, col) in value_cols.iter().enumerate() {
-                        let src_vals: Vec<f64> =
-                            rows.iter().map(|&ri| col[ri]).collect();
+                        let src_vals: Vec<f64> = rows.iter().map(|&ri| col[ri]).collect();
                         let val = if is_idw {
                             geospatial::idw_haversine(
-                                &src_lats, &src_lons, &src_vals,
-                                target_lat, target_lon, power, k,
+                                &src_lats, &src_lons, &src_vals, target_lat, target_lon, power, k,
                             )
                         } else {
                             geospatial::rbf_haversine(
-                                &src_lats, &src_lons, &src_vals,
-                                target_lat, target_lon, kernel, epsilon, k,
+                                &src_lats, &src_lons, &src_vals, target_lat, target_lon, kernel,
+                                epsilon, k,
                             )
                         };
                         out_value_cols[vi].push(val);
