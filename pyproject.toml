@@ -1,6 +1,6 @@
 [project]
 name = "interpolars"
-version = "1.2.0"
+version = "2.0.0a1"
 description = "Interpolation plugin for Polars"
 readme = "README.md"
 authors = [
@@ -16,8 +16,10 @@ keywords = ["polars", "interpolation", "plugin"]
 [dependency-groups]
 dev = [
     "maturin>=1.10.2",
+    "numpy>=2.4.2",
     "pytest>=8.0",
     "pytest-cov>=7.0.0",
+    "scipy>=1.17.1",
 ]
 
 [tool.maturin]
