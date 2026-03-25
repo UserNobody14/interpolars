@@ -1,11 +1,14 @@
 ### interpolars
 
-`interpolars` is a small Polars plugin that does **N-dimensional linear interpolation** from a
-source "grid" (your DataFrame) onto an explicit **target** DataFrame.
+`interpolars` is a small Polars plugin that does **N-dimensional interpolation** from a
+source "grid" (your DataFrame) onto an explicit **target** DataFrame, with optional
+**spherical-geometry-aware geospatial interpolation** for lat/lon data.
 
 It supports:
 
-- **1D/2D/3D/... multilinear interpolation**
+- **1D/2D/3D/... multilinear interpolation** (`interpolate_nd`)
+- **Geospatial interpolation** on lat/lon coordinates with IDL wrapping, pole handling, and
+  scattered-data methods (`interpolate_geospatial`)
 - **Multiple value columns** in one call
 - **Target passthrough columns** (e.g. labels/metadata)
 - **Grouped interpolation over "extra" coordinate dims** (e.g. group by `time` and interpolate
@@ -44,9 +47,19 @@ Notes:
 
 ---
 
-### The API: `interpolate_nd`
+### The API
 
-The only public function is `interpolate_nd`, which returns a **Polars expression** (`pl.Expr`).
+Two public functions are available:
+
+- **`interpolate_nd`** -- general N-dimensional interpolation on rectilinear grids
+- **`interpolate_geospatial`** -- latitude/longitude interpolation with spherical-geometry
+  awareness (IDL wrapping, pole handling, scattered-data methods)
+
+Both return a **Polars expression** (`pl.Expr`).
+
+---
+
+### `interpolate_nd`
 
 ```python
 from interpolars import interpolate_nd
@@ -302,12 +315,115 @@ extrapolates at boundaries.
 
 ---
 
+### `interpolate_geospatial`
+
+For latitude/longitude data, `interpolate_geospatial` provides spherical-geometry-aware
+interpolation with automatic International Date Line wrapping, pole averaging, and support for
+both gridded and scattered source data.
+
+```python
+from interpolars import interpolate_geospatial
+
+expr = interpolate_geospatial(
+    source_lat="lat",                      # source latitude column (degrees)
+    source_lon="lon",                      # source longitude column (degrees)
+    value_cols_or_exprs=["temperature"],   # value column(s) to interpolate
+    interp_target=target_df,               # DataFrame with target lat/lon (+ metadata)
+    handle_missing="error",                # "error" | "drop" | "fill" | "nearest"
+    fill_value=None,                       # required when handle_missing="fill"
+    extrapolate=False,                     # True → extrapolate at boundaries
+    method="tensor_product",               # "tensor_product" | "slerp" | "idw" | "rbf"
+    # keyword-only parameters:
+    tensor_method="linear",                # 1-D sub-method for tensor_product
+    power=2.0,                             # distance exponent for idw
+    k_neighbors=0,                         # nearest neighbors for idw/rbf (0 = all for idw)
+    rbf_kernel="thin_plate_spline",        # kernel for rbf
+    rbf_epsilon=None,                      # shape param for rbf (None = auto)
+    lon_range="auto",                      # "signed_180" | "unsigned_360" | "auto"
+)
+```
+
+Usage follows the same pattern as `interpolate_nd`:
+
+```python
+import polars as pl
+from interpolars import interpolate_geospatial
+
+out = (
+    source_df.lazy()
+    .select(interpolate_geospatial("lat", "lon", ["temperature"], target_df))
+    .unnest("interpolated")
+    .collect()
+)
+```
+
+---
+
+### Geospatial interpolation methods
+
+Four methods are available, selected via the `method` parameter:
+
+| Method | Input requirement | Description |
+|--------|-------------------|-------------|
+| `"tensor_product"` (default) | Rectilinear grid | Tensor-product interpolation with longitude wrapping, pole averaging, and ghost points for periodic grids. Supports all 1-D sub-methods via `tensor_method`. |
+| `"slerp"` | Rectilinear grid | Bilinear interpolation using SLERP-derived angular fraction weights along parallels. More accurate than standard bilinear near the poles and for large grid cells. Linear only. |
+| `"idw"` | Any (including scattered) | Inverse Distance Weighting using Haversine (great-circle) distance. Tune via `power` and `k_neighbors`. |
+| `"rbf"` | Any (including scattered) | Local Radial Basis Function interpolation using Haversine distance. Solves a k x k linear system per target point. Tune via `rbf_kernel`, `rbf_epsilon`, and `k_neighbors`. |
+
+#### Tensor-product sub-methods (`tensor_method`)
+
+When `method="tensor_product"`, the `tensor_method` parameter selects the 1-D interpolation
+method applied along each axis:
+
+`"linear"` (default), `"nearest"`, `"cubic"`, `"pchip"`, `"akima"`, `"makima"`
+
+#### IDW tuning
+
+- **`power`** (default `2.0`): distance exponent. Higher values give more weight to nearby points.
+- **`k_neighbors`** (default `0`): number of nearest source points to use. `0` means use all.
+
+#### RBF tuning
+
+- **`rbf_kernel`**: `"linear"`, `"thin_plate_spline"` (default), `"cubic"`, `"gaussian"`,
+  `"multiquadric"`, `"inverse_multiquadric"`
+- **`rbf_epsilon`**: shape parameter (`None` = auto-detect from median pairwise distance)
+- **`k_neighbors`**: number of nearest neighbors for the local solve (default `20` for RBF)
+
+---
+
+### Longitude convention (`lon_range`)
+
+The `lon_range` parameter controls how longitude values are normalized:
+
+| Mode | Range | When to use |
+|------|-------|-------------|
+| `"signed_180"` | [-180, 180) | Source data uses negative longitudes for the Western hemisphere |
+| `"unsigned_360"` | [0, 360) | Source data uses 0-360 convention |
+| `"auto"` (default) | Detected from source | Uses `signed_180` if any source longitude is negative, otherwise `unsigned_360` |
+
+```python
+# Explicit signed_180: source data with 350° is normalized to -10°
+result = (
+    source_df.lazy()
+    .select(
+        interpolate_geospatial(
+            "lat", "lon", ["v"], target_df,
+            lon_range="signed_180",
+        )
+    )
+    .unnest("interpolated")
+    .collect()
+)
+```
+
+---
+
 ### Important constraints / behavior
 
 - **NaN/Null handling is configurable** via `handle_missing` (see above). The default (`"error"`)
   raises on any NaN or Null.
-- **Source must be a full cartesian grid (per group)** for the interpolation dimensions:
-  every "corner" required for multilinear interpolation must exist, otherwise you'll get an error.
+- **Grid requirement**: `interpolate_nd`, `tensor_product`, and `slerp` require a full cartesian
+  grid (per group) -- every corner must exist. `idw` and `rbf` work on arbitrary scattered points.
 - **Out-of-bounds targets**: clamped by default; set `extrapolate=True` for linear extrapolation.
 - **Duplicate names**: value field names cannot collide with `interp_target` columns (and group
   fields cannot collide either); collisions error.
@@ -316,6 +432,6 @@ extrapolates at boundaries.
 
 ### Project layout
 
-- `src/interpolars/__init__.py`: Python API wrapper (registers the Polars plugin function)
+- `src/interpolars/__init__.py`: Python API wrapper (`interpolate_nd` + `interpolate_geospatial`)
 - `src/expressions.rs`: the Polars expression implementation (Rust)
-- `tests/`: pytest suite with examples (including grouped + Date/Duration coverage)
+- `tests/`: pytest suite with examples (including grouped, Date/Duration, and geospatial coverage)
