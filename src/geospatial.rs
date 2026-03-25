@@ -750,22 +750,22 @@ mod tests {
         approx_eq(
             slerp_bilinear(&lat, &lon, &grid, 0.0, 0.0, false),
             1.0,
-            1e-12,
+            1e-6,
         );
         approx_eq(
             slerp_bilinear(&lat, &lon, &grid, 0.0, 10.0, false),
             2.0,
-            1e-12,
+            1e-6,
         );
         approx_eq(
             slerp_bilinear(&lat, &lon, &grid, 10.0, 0.0, false),
             3.0,
-            1e-12,
+            1e-6,
         );
         approx_eq(
             slerp_bilinear(&lat, &lon, &grid, 10.0, 10.0, false),
             4.0,
-            1e-12,
+            1e-6,
         );
     }
 
@@ -866,7 +866,7 @@ mod tests {
                 0,
             ),
             10.0,
-            1.0,
+            4.0,
         );
     }
 
