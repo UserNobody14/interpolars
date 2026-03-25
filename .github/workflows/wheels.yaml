@@ -7,17 +7,23 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-      - master
     tags:
-      - '*'
+      - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (branch or PR) to run against'
+        required: false
+        default: ''
+
+
 
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+
 
 
 permissions:
