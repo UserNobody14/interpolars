@@ -76,7 +76,7 @@ jobs:
             curl -sS -X POST \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/publish.yaml/dispatches" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/wheels.yaml/dispatches" \
               -d "{\"ref\":\"$TAG\"}"
             echo "Created and pushed tag $TAG, triggered Publish workflow"
           else
