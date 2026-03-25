@@ -6,7 +6,7 @@ edition = "2024"
 [lib]
 name = "_core"
 # "cdylib" is necessary to produce a shared library for Python to import from.
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
@@ -24,7 +24,8 @@ pyo3-polars = { git = "https://github.com/pola-rs/polars.git", rev = "099564e917
 serde_json = "1.0.145"
 serde = "1.0.213"
 
-scirs2-interpolate = { git = "https://github.com/UserNobody14/scirs"}
+# scirs2-interpolate = { git = "https://github.com/UserNobody14/scirs"}
+scirs2-interpolate = {version = "0.3.4", features = ["simd", "linalg"] }
 ndarray = "0.17"
 
 

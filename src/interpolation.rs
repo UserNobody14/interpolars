@@ -54,29 +54,6 @@ pub trait Interpolate1D: Sync + Send {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Return `i` such that `xs[i] <= x < xs[i+1]`, clamped to `[0, n-2]`.
-pub(crate) fn find_interval(xs: &[f64], x: f64) -> usize {
-    debug_assert!(xs.len() >= 2);
-    let n = xs.len();
-    if x <= xs[0] {
-        return 0;
-    }
-    if x >= xs[n - 1] {
-        return n - 2;
-    }
-    let mut lo = 0usize;
-    let mut hi = n - 1;
-    while lo < hi - 1 {
-        let mid = (lo + hi) / 2;
-        if xs[mid] <= x {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
 fn extrapolate_mode(extrapolate: bool) -> ExtrapolateMode {
     if extrapolate {
         ExtrapolateMode::Extrapolate
@@ -161,7 +138,7 @@ impl Interpolate1D for PchipInterp {
 struct AkimaInterp;
 
 impl Interpolate1D for AkimaInterp {
-    fn eval(&self, xs: &[f64], ys: &[f64], x: f64, extrapolate: bool) -> f64 {
+    fn eval(&self, xs: &[f64], ys: &[f64], x: f64, _extrapolate: bool) -> f64 {
         let n = xs.len();
         debug_assert_eq!(n, ys.len());
         if n == 1 {
@@ -169,10 +146,8 @@ impl Interpolate1D for AkimaInterp {
         }
         let x_view = ArrayView1::from(xs);
         let y_view = ArrayView1::from(ys);
-        let mode = extrapolate_mode(extrapolate);
-        let spline = AkimaSpline::new(&x_view, &y_view)
-            .expect("AkimaSpline construction failed")
-            .with_extrapolation(mode);
+        // let mode = extrapolate_mode(extrapolate);
+        let spline = AkimaSpline::new(&x_view, &y_view).expect("AkimaSpline construction failed");
         spline.evaluate(x).expect("AkimaSpline evaluation failed")
     }
 }
@@ -184,8 +159,17 @@ impl Interpolate1D for AkimaInterp {
 struct MakimaInterp;
 
 impl Interpolate1D for MakimaInterp {
-    fn eval(&self, xs: &[f64], ys: &[f64], x: f64, extrapolate: bool) -> f64 {
-        eval_via_interp1d(xs, ys, x, extrapolate, Scirs2Method1D::Makima)
+    fn eval(&self, xs: &[f64], ys: &[f64], x: f64, _extrapolate: bool) -> f64 {
+        let n = xs.len();
+        debug_assert_eq!(n, ys.len());
+        if n == 1 {
+            return ys[0];
+        }
+        let x_view = ArrayView1::from(xs);
+        let y_view = ArrayView1::from(ys);
+        // let mode = extrapolate_mode(extrapolate);
+        let spline = AkimaSpline::new(&x_view, &y_view).expect("AkimaSpline construction failed");
+        spline.evaluate(x).expect("AkimaSpline evaluation failed")
     }
 }
 
@@ -300,8 +284,8 @@ pub fn interpolate_grid(
         let interp = RegularGridInterpolator::new(points, nd_values, scirs2_method, nd_extrap)
             .expect("RegularGridInterpolator construction failed");
 
-        let xi = Array2::from_shape_vec((1, n_dims), target.to_vec())
-            .expect("target shape mismatch");
+        let xi =
+            Array2::from_shape_vec((1, n_dims), target.to_vec()).expect("target shape mismatch");
 
         let result = interp
             .__call__(&xi.view())
@@ -417,11 +401,7 @@ mod tests {
 
     // --- N-D interpolation: more methods on 2D grids ---
 
-    fn build_2d_grid(
-        ax: &[f64],
-        ay: &[f64],
-        f: impl Fn(f64, f64) -> f64,
-    ) -> Vec<f64> {
+    fn build_2d_grid(ax: &[f64], ay: &[f64], f: impl Fn(f64, f64) -> f64) -> Vec<f64> {
         let mut vals = Vec::with_capacity(ax.len() * ay.len());
         for &x in ax {
             for &y in ay {
@@ -454,7 +434,13 @@ mod tests {
         let ay = [0.0, 1.0, 2.0];
         let vals = build_2d_grid(&ax, &ay, |x, y| x * x + 2.0 * y);
         let axes: Vec<&[f64]> = vec![&ax, &ay];
-        let r = interpolate_grid(&axes, &vals, &[0.4, 0.6], InterpolationMethod::Nearest, false);
+        let r = interpolate_grid(
+            &axes,
+            &vals,
+            &[0.4, 0.6],
+            InterpolationMethod::Nearest,
+            false,
+        );
         approx_eq(r, 0.0 * 0.0 + 2.0 * 1.0, 1e-12);
     }
 
@@ -502,7 +488,13 @@ mod tests {
         let vals = build_2d_grid(&ax, &ay, |x, y| x + y);
         let axes: Vec<&[f64]> = vec![&ax, &ay];
 
-        let r = interpolate_grid(&axes, &vals, &[2.5, 1.5], InterpolationMethod::Makima, false);
+        let r = interpolate_grid(
+            &axes,
+            &vals,
+            &[2.5, 1.5],
+            InterpolationMethod::Makima,
+            false,
+        );
         approx_eq(r, 4.0, 1e-10);
     }
 

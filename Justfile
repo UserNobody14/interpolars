@@ -9,6 +9,11 @@ default:
 test:
     uv run pytest
 
+[group: 'tests']
+[doc('Run the rust test suite')]
+rtest:
+    cargo test --no-default-features
+
 [group: 'build']
 [doc('Build the project')]
 build:

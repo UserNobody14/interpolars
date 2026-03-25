@@ -7,8 +7,28 @@
 
 use serde::Deserialize;
 
-use crate::interpolation::find_interval;
-
+/// Return `i` such that `xs[i] <= x < xs[i+1]`, clamped to `[0, n-2]`.
+pub(crate) fn find_interval(xs: &[f64], x: f64) -> usize {
+    debug_assert!(xs.len() >= 2);
+    let n = xs.len();
+    if x <= xs[0] {
+        return 0;
+    }
+    if x >= xs[n - 1] {
+        return n - 2;
+    }
+    let mut lo = 0usize;
+    let mut hi = n - 1;
+    while lo < hi - 1 {
+        let mid = (lo + hi) / 2;
+        if xs[mid] <= x {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
