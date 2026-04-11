@@ -7,13 +7,22 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-      - master
     tags:
-      - '*'
+      - 'v*.*.*'
   pull_request:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (branch or PR) to run against'
+        required: false
+        default: ''
+
+
+
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -26,16 +35,13 @@ jobs:
         platform:
           - runner: ubuntu-22.04
             target: x86_64
+            manylinux: manylinux_2_28
           - runner: ubuntu-22.04
             target: x86
+            manylinux: manylinux_2_28
           - runner: ubuntu-22.04
             target: aarch64
-          - runner: ubuntu-22.04
-            target: armv7
-          - runner: ubuntu-22.04
-            target: s390x
-          - runner: ubuntu-22.04
-            target: ppc64le
+            manylinux: manylinux_2_28
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -47,14 +53,14 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --manifest-path crates/interpolars-py/Cargo.toml
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          manylinux: auto
+          manylinux: ${{ matrix.platform.manylinux }}
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --manifest-path crates/interpolars-py/Cargo.toml -i python3.14t
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          manylinux: auto
+          manylinux: ${{ matrix.platform.manylinux }}
       - name: Upload wheels
         uses: actions/upload-artifact@v5
         with:
@@ -193,6 +199,8 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     needs: [linux, musllinux, windows, macos, sdist]
+    environment:
+      name: pypi
     permissions:
       # Use to sign the release artifacts
       id-token: write
@@ -212,5 +220,3 @@ jobs:
       - name: Publish to PyPI
         if: ${{ startsWith(github.ref, 'refs/tags/') }}
         run: uv publish 'wheels-*/*'
-        env:
-          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
