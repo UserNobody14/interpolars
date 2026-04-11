@@ -1,10 +1,11 @@
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
+use rs_interpolate as interpolation;
+use rs_interpolate::InterpolationMethod;
 use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::geospatial::{self, GeospatialMethod, LonRange, RbfKernel};
-use crate::interpolation::{self, InterpolationMethod};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]

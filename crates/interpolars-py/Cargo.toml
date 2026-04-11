@@ -1,0 +1,20 @@
+[package]
+name = "interpolars-py"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+rs-interpolate = { path = "../rs-interpolate" }
+pyo3.workspace = true
+polars.workspace = true
+pyo3-polars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]

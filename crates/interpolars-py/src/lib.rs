@@ -1,7 +1,6 @@
 use pyo3::prelude::*;
 mod expressions;
 mod geospatial;
-mod interpolation;
 
 
 /// A Python module implemented in Rust. The name of this module must match

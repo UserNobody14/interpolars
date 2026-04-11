@@ -51,7 +51,7 @@ impl InterpolationMethod {
 // ---------------------------------------------------------------------------
 
 /// Return `i` such that `xs[i] <= x < xs[i+1]`, clamped to `[0, n-2]`.
-pub(crate) fn find_interval(xs: &[f64], x: f64) -> usize {
+pub fn find_interval(xs: &[f64], x: f64) -> usize {
     debug_assert!(xs.len() >= 2);
     let n = xs.len();
     if x <= xs[0] {
