@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 
-use crate::interpolation::find_interval;
+use rs_interpolate::find_interval;
 
 // ---------------------------------------------------------------------------
 // Enums

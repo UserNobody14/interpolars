@@ -1074,12 +1074,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "interpolars"
+name = "interpolars-py"
 version = "0.1.0"
 dependencies = [
  "polars",
  "pyo3",
  "pyo3-polars",
+ "rs-interpolate",
  "serde",
  "serde_json",
 ]
@@ -2475,6 +2476,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
+ "serde",
+]
+
+[[package]]
+name = "rs-interpolate"
+version = "0.1.0"
+dependencies = [
  "serde",
 ]
 
