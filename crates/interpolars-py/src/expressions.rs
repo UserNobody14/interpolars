@@ -603,29 +603,30 @@ fn interpolate_nd(inputs: &[Series], kwargs: InterpolateKwargs) -> PolarsResult<
             strides[d] = strides[d + 1] * axes[d + 1].len();
         }
 
+        // Track assigned cells separately from float values: NaN may be a legitimate
+        // filled value (`handle_missing="fill"`, `fill_value=NaN`) and must not be
+        // mistaken for a hole in the Cartesian grid.
         let grids: Vec<Vec<f64>> = value_cols
             .iter()
-            .map(|col| {
-                let mut grid = vec![f64::NAN; total_grid];
+            .enumerate()
+            .map(|(vi, col)| {
+                let mut grid: Vec<Option<f64>> = vec![None; total_grid];
                 for (key, &src_row) in &coord_map {
                     let flat_idx: usize = (0..interp_dims)
                         .map(|d| axis_idx_maps[d][&key[d]] * strides[d])
                         .sum();
-                    grid[flat_idx] = col[src_row];
+                    grid[flat_idx] = Some(col[src_row]);
                 }
-                grid
+                if grid.iter().any(|v| v.is_none()) {
+                    polars_bail!(
+                        ComputeError:
+                        "source grid missing points for value '{}'; ensure source is a full cartesian grid within each group",
+                        value_names[vi]
+                    );
+                }
+                Ok(grid.into_iter().flatten().collect::<Vec<f64>>())
             })
-            .collect();
-
-        for (vi, grid) in grids.iter().enumerate() {
-            if grid.iter().any(|v| v.is_nan()) {
-                polars_bail!(
-                    ComputeError:
-                    "source grid missing points for value '{}'; ensure source is a full cartesian grid within each group",
-                    value_names[vi]
-                );
-            }
-        }
+            .collect::<PolarsResult<_>>()?;
 
         let axis_refs: Vec<&[f64]> = axes.iter().map(|a| a.as_slice()).collect();
 
@@ -735,22 +736,22 @@ fn build_latlon_grid(
         .iter()
         .enumerate()
         .map(|(vi, col)| {
-            let mut grid = vec![f64::NAN; total_grid];
+            let mut grid: Vec<Option<f64>> = vec![None; total_grid];
             for (&(lat_b, lon_b), &src_row) in &coord_map {
                 if let (Some(&li), Some(&loi)) =
                     (lat_idx_map.get(&lat_b), lon_idx_map.get(&lon_b))
                 {
-                    grid[li * n_lon + loi] = col[src_row];
+                    grid[li * n_lon + loi] = Some(col[src_row]);
                 }
             }
-            if grid.iter().any(|v| v.is_nan()) {
+            if grid.iter().any(|v| v.is_none()) {
                 polars_bail!(
                     ComputeError:
                     "source grid missing points for value '{}'; ensure source is a full cartesian grid within each group",
                     value_names[vi]
                 );
             }
-            Ok(grid)
+            Ok(grid.into_iter().flatten().collect::<Vec<f64>>())
         })
         .collect::<PolarsResult<_>>()?;
 
